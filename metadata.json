@@ -1,0 +1,5 @@
+{
+  "name": "WVVT Newsletter Mailing Platform",
+  "description": "A secure, robust, and fault-tolerant web-based newsletter mailing platform to manage subscribers with advanced, flexible tagging capabilities, create and send HTML newsletters, and track unsubscribes.",
+  "requestFramePermissions": []
+}
