@@ -337,7 +337,7 @@ const EditModal: React.FC<{
         } else {
             setFormData(item);
         }
-    }, [item, table, allData]);
+    }, [item.id, table]);
 
     const handleChange = (field: string, value: any) => {
         setFormData((prev: any) => ({ ...prev, [field]: value }));
