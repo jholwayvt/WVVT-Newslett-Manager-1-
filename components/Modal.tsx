@@ -1,4 +1,3 @@
-
 import React from 'react';
 
 interface ModalProps {
@@ -8,8 +7,17 @@ interface ModalProps {
 }
 
 const Modal: React.FC<ModalProps> = ({ title, onClose, children }) => {
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      onClose();
+    }
+  };
+  
   return (
-    <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4">
+    <div 
+      className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center p-4"
+      onClick={handleBackdropClick}
+    >
       <div className="relative bg-white rounded-lg shadow-xl w-full max-w-2xl">
         <div className="flex justify-between items-center p-5 border-b rounded-t">
           <h3 className="text-xl font-semibold text-gray-900">{title}</h3>

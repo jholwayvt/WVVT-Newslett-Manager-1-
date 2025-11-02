@@ -1,18 +1,33 @@
-
 import React, { useState } from 'react';
 import { Campaign, Subscriber } from '../types';
 import Modal from './Modal';
+import ConfirmationModal from './ConfirmationModal';
 import { ICONS } from '../constants';
 
 interface CampaignsProps {
   campaigns: Campaign[];
   subscribers: Subscriber[];
   handleEdit: (id: number) => void;
-  handleDelete: (id: number) => void;
+  handleDelete: (id: number) => Promise<void>;
+  handleClone: (id: number) => void;
 }
 
-const Campaigns: React.FC<CampaignsProps> = ({ campaigns, subscribers, handleEdit, handleDelete }) => {
+const Campaigns: React.FC<CampaignsProps> = ({ campaigns, subscribers, handleEdit, handleDelete, handleClone }) => {
   const [viewingCampaign, setViewingCampaign] = useState<Campaign | null>(null);
+  const [deletingCampaign, setDeletingCampaign] = useState<Campaign | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  
+  const handleDeleteClick = (campaign: Campaign) => {
+      setDeletingCampaign(campaign);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deletingCampaign) return;
+    setIsDeleting(true);
+    await handleDelete(deletingCampaign.id);
+    setIsDeleting(false);
+    setDeletingCampaign(null);
+  };
 
   return (
     <div>
@@ -42,10 +57,13 @@ const Campaigns: React.FC<CampaignsProps> = ({ campaigns, subscribers, handleEdi
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
                     <button onClick={() => setViewingCampaign(campaign)} className="text-indigo-600 hover:text-indigo-900 p-1" title="View">{ICONS.eye}</button>
+                    {campaign.status === 'Sent' && (
+                        <button onClick={() => handleClone(campaign.id)} className="text-purple-600 hover:text-purple-900 p-1" title="Clone to Draft">{ICONS.transfer}</button>
+                    )}
                     {campaign.status === 'Draft' && (
                         <>
                          <button onClick={() => handleEdit(campaign.id)} className="text-blue-600 hover:text-blue-900 p-1" title="Edit">{ICONS.edit}</button>
-                         <button onClick={() => handleDelete(campaign.id)} className="text-red-600 hover:text-red-900 p-1" title="Delete">{ICONS.trash}</button>
+                         <button onClick={() => handleDeleteClick(campaign)} className="text-red-600 hover:text-red-900 p-1" title="Delete">{ICONS.trash}</button>
                         </>
                     )}
                 </td>
@@ -61,6 +79,17 @@ const Campaigns: React.FC<CampaignsProps> = ({ campaigns, subscribers, handleEdi
       </div>
       {viewingCampaign && (
         <CampaignDetailModal campaign={viewingCampaign} subscribers={subscribers} onClose={() => setViewingCampaign(null)} />
+      )}
+      {deletingCampaign && (
+        <ConfirmationModal
+            isOpen={!!deletingCampaign}
+            title="Delete Draft"
+            message={`Are you sure you want to delete the draft "${deletingCampaign.subject}"? This action cannot be undone.`}
+            onConfirm={handleConfirmDelete}
+            onCancel={() => setDeletingCampaign(null)}
+            confirmText="Delete"
+            isConfirming={isDeleting}
+        />
       )}
     </div>
   );
@@ -93,7 +122,7 @@ const CampaignDetailModal: React.FC<{
         <div>
           <h4 className="font-semibold text-gray-800 mb-2">Content Preview:</h4>
           <div className="border rounded-md p-4 max-h-60 overflow-y-auto bg-gray-50">
-             <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: campaign.body || '<p>No content.</p>'}} />
+             <div className="prose prose-lg max-w-none" dangerouslySetInnerHTML={{ __html: campaign.body || '<p>No content.</p>'}} />
           </div>
         </div>
         <hr />

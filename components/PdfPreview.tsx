@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { TagLogic } from '../types';
 
@@ -23,7 +22,7 @@ const PdfPreview: React.FC<PdfPreviewProps> = ({ subject, body, recipientCount, 
         
         <h2 className="text-xl font-bold border-b pb-2 mb-4">Newsletter Content Preview</h2>
         <div 
-          className="prose prose-sm max-w-none" 
+          className="prose prose-lg max-w-none" 
           dangerouslySetInnerHTML={{ __html: body || '<p>No content yet.</p>' }}
         />
       </div>

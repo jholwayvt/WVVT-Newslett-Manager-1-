@@ -3,36 +3,55 @@ import React, { useState } from 'react';
 import { Tag, Campaign } from '../types';
 import { ICONS } from '../constants';
 import Modal from './Modal';
+import ConfirmationModal from './ConfirmationModal';
+import * as dbService from '../services/dbService';
 
 interface TagsProps {
+  db: dbService.DB;
+  activeDatabaseId: number;
+  refreshData: () => Promise<void>;
   tags: Tag[];
-  setTags: React.Dispatch<React.SetStateAction<Tag[]>>;
   campaigns: Campaign[];
 }
 
-const Tags: React.FC<TagsProps> = ({ tags, setTags, campaigns }) => {
+const Tags: React.FC<TagsProps> = ({ db, activeDatabaseId, refreshData, tags, campaigns }) => {
   const [newTagName, setNewTagName] = useState('');
   const [historyTag, setHistoryTag] = useState<Tag | null>(null);
+  const [editingTag, setEditingTag] = useState<Tag | null>(null);
+  const [deletingTag, setDeletingTag] = useState<Tag | null>(null);
+  
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
-  const handleAddTag = (e: React.FormEvent) => {
+  const handleAddTag = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newTagName.trim()) {
-      const newTag: Tag = {
-        id: Date.now(),
-        name: newTagName.trim(),
-      };
-      setTags(prev => [...prev, newTag]);
-      setNewTagName('');
-    }
+    if (!newTagName.trim()) return;
+    setIsSubmitting(true);
+    await dbService.addTag(db, activeDatabaseId, newTagName.trim());
+    await refreshData();
+    setNewTagName('');
+    setIsSubmitting(false);
+  };
+  
+  const handleEditTag = async (tag: Tag) => {
+      setIsSubmitting(true);
+      await dbService.updateTag(db, tag);
+      await refreshData();
+      setEditingTag(null);
+      setIsSubmitting(false);
   };
 
-  const handleDeleteTag = (id: number) => {
-    if (window.confirm('Are you sure you want to delete this tag? This will remove it from all subscribers.')) {
-        // In a real app, you might want to handle this differently.
-        // For now, we'll just remove the tag itself.
-        // We could also update all subscribers to remove the tag.
-      setTags(prev => prev.filter(tag => tag.id !== id));
-    }
+  const handleDeleteClick = (tag: Tag) => {
+    setDeletingTag(tag);
+  };
+  
+  const handleConfirmDelete = async () => {
+      if (!deletingTag) return;
+      setIsDeleting(true);
+      await dbService.deleteTag(db, deletingTag.id);
+      await refreshData();
+      setIsDeleting(false);
+      setDeletingTag(null);
   };
 
   return (
@@ -49,9 +68,10 @@ const Tags: React.FC<TagsProps> = ({ tags, setTags, campaigns }) => {
         />
         <button
           type="submit"
-          className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-indigo-600 border border-transparent rounded-md shadow-sm hover:bg-indigo-700"
+          disabled={isSubmitting || !newTagName.trim()}
+          className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-indigo-600 border border-transparent rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-300"
         >
-          {ICONS.plus} <span className="ml-2">Add Tag</span>
+          {ICONS.plus} <span className="ml-2">{isSubmitting ? 'Adding...' : 'Add Tag'}</span>
         </button>
       </form>
 
@@ -68,8 +88,15 @@ const Tags: React.FC<TagsProps> = ({ tags, setTags, campaigns }) => {
                  >
                     {ICONS.history}
                  </button>
+                 <button
+                    onClick={() => setEditingTag(tag)}
+                    className="text-indigo-600 hover:text-indigo-800"
+                    title="Edit Tag"
+                 >
+                    {ICONS.edit}
+                 </button>
                 <button
-                  onClick={() => handleDeleteTag(tag.id)}
+                  onClick={() => handleDeleteClick(tag)}
                   className="text-red-500 hover:text-red-700"
                   title="Delete Tag"
                 >
@@ -82,6 +109,25 @@ const Tags: React.FC<TagsProps> = ({ tags, setTags, campaigns }) => {
       </div>
       {historyTag && (
         <TagHistoryModal tag={historyTag} campaigns={campaigns} onClose={() => setHistoryTag(null)} />
+      )}
+      {editingTag && (
+        <EditTagModal 
+            tag={editingTag} 
+            onClose={() => setEditingTag(null)} 
+            onSave={handleEditTag}
+            isSaving={isSubmitting}
+        />
+      )}
+      {deletingTag && (
+        <ConfirmationModal
+            isOpen={!!deletingTag}
+            title="Delete Tag"
+            message={`Are you sure you want to delete the tag "${deletingTag.name}"? This will remove it from all subscribers. This action cannot be undone.`}
+            onConfirm={handleConfirmDelete}
+            onCancel={() => setDeletingTag(null)}
+            confirmText="Delete"
+            isConfirming={isDeleting}
+        />
       )}
     </div>
   );
@@ -113,6 +159,40 @@ const TagHistoryModal: React.FC<{
             )}
         </Modal>
     )
-}
+};
+
+const EditTagModal: React.FC<{
+    tag: Tag;
+    onClose: () => void;
+    onSave: (tag: Tag) => void;
+    isSaving: boolean;
+}> = ({ tag, onClose, onSave, isSaving }) => {
+    const [name, setName] = useState(tag.name);
+    
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (name.trim()) {
+            onSave({ ...tag, name: name.trim() });
+        }
+    };
+
+    return (
+        <Modal title="Edit Tag" onClose={onClose}>
+            <form onSubmit={handleSubmit}>
+                <div className="space-y-4">
+                  <div>
+                    <label htmlFor="name" className="block text-sm font-medium text-gray-700">Tag Name</label>
+                    <input type="text" id="name" value={name} onChange={(e) => setName(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
+                  </div>
+                </div>
+                <div className="mt-6 flex justify-end space-x-3">
+                  <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button>
+                  <button type="submit" disabled={isSaving || !name.trim()} className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:bg-indigo-300">{isSaving ? 'Saving...' : 'Save'}</button>
+                </div>
+            </form>
+        </Modal>
+    );
+};
+
 
 export default Tags;

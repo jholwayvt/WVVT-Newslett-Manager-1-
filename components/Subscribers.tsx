@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { AppSubscriber, Tag, Campaign } from '../types';
 import { ICONS } from '../constants';
 import Modal from './Modal';
+import ConfirmationModal from './ConfirmationModal';
 import * as dbService from '../services/dbService';
 
 interface SubscribersProps {
@@ -20,6 +21,8 @@ const Subscribers: React.FC<SubscribersProps> = ({ db, activeDatabaseId, refresh
   const [searchTerm, setSearchTerm] = useState('');
   const [historySubscriber, setHistorySubscriber] = useState<AppSubscriber | null>(null);
   const [isImportExportOpen, setImportExportOpen] = useState(false);
+  const [deletingSubscriber, setDeletingSubscriber] = useState<AppSubscriber | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const handleAdd = () => {
     setEditingSubscriber(null);
@@ -31,12 +34,19 @@ const Subscribers: React.FC<SubscribersProps> = ({ db, activeDatabaseId, refresh
     setIsModalOpen(true);
   };
 
-  const handleDelete = async (id: number) => {
-    if (window.confirm('Are you sure you want to delete this subscriber?')) {
-      await dbService.deleteSubscriber(db, id);
-      await refreshData();
-    }
+  const handleDeleteClick = (subscriber: AppSubscriber) => {
+    setDeletingSubscriber(subscriber);
   };
+  
+  const handleConfirmDelete = async () => {
+    if (!deletingSubscriber) return;
+    setIsDeleting(true);
+    await dbService.deleteSubscriber(db, deletingSubscriber.id);
+    await refreshData();
+    setIsDeleting(false);
+    setDeletingSubscriber(null);
+  };
+
 
   const handleSave = async (subscriberData: Omit<AppSubscriber, 'id' | 'subscribed_at'> & { id?: number }) => {
     if (subscriberData.id) {
@@ -115,7 +125,7 @@ const Subscribers: React.FC<SubscribersProps> = ({ db, activeDatabaseId, refresh
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
                   <button onClick={() => setHistorySubscriber(subscriber)} className="text-gray-500 hover:text-gray-800 p-1" title="View History">{ICONS.history}</button>
                   <button onClick={() => handleEdit(subscriber)} className="text-indigo-600 hover:text-indigo-900 p-1" title="Edit">{ICONS.edit}</button>
-                  <button onClick={() => handleDelete(subscriber.id)} className="text-red-600 hover:text-red-900 p-1" title="Delete">{ICONS.trash}</button>
+                  <button onClick={() => handleDeleteClick(subscriber)} className="text-red-600 hover:text-red-900 p-1" title="Delete">{ICONS.trash}</button>
                 </td>
               </tr>
             ))}
@@ -145,6 +155,17 @@ const Subscribers: React.FC<SubscribersProps> = ({ db, activeDatabaseId, refresh
           subscribers={subscribers}
           tags={tags}
           onClose={() => setImportExportOpen(false)}
+        />
+      )}
+      {deletingSubscriber && (
+        <ConfirmationModal
+            isOpen={!!deletingSubscriber}
+            title="Delete Subscriber"
+            message={`Are you sure you want to permanently delete ${deletingSubscriber.name} (${deletingSubscriber.email})? This action cannot be undone.`}
+            onConfirm={handleConfirmDelete}
+            onCancel={() => setDeletingSubscriber(null)}
+            confirmText="Delete"
+            isConfirming={isDeleting}
         />
       )}
     </div>

@@ -340,6 +340,12 @@ export const deleteSubscriber = async (db: DB, id: number) => {
     saveDbToLocalStorage(db);
 };
 
+export const addTag = async (db: DB, databaseId: number, name: string): Promise<Tag> => {
+    const id = Date.now();
+    db.run('INSERT INTO tags (id, database_id, name) VALUES (?, ?, ?)', [id, databaseId, name]);
+    saveDbToLocalStorage(db);
+    return { id, database_id: databaseId, name };
+};
 
 export const updateTag = async (db: DB, tag: Tag) => {
     db.run('UPDATE tags SET name = ? WHERE id = ?', [tag.name, tag.id]);

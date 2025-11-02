@@ -13,11 +13,8 @@ interface DataManagerProps {
   refreshData: () => Promise<void>;
   databases: SimpleDb[];
   subscribers: AppSubscriber[];
-  setSubscribers: React.Dispatch<React.SetStateAction<AppSubscriber[]>>;
   tags: Tag[];
-  setTags: React.Dispatch<React.SetStateAction<Tag[]>>;
   campaigns: Campaign[];
-  setCampaigns: React.Dispatch<React.SetStateAction<Campaign[]>>;
 }
 
 // --- MAIN COMPONENT ---
@@ -261,7 +258,7 @@ const companyColumns = () => [
     { header: 'Email', accessor: 'key_contact_email' },
 ];
 
-const PivotTable: React.FC<{data: any[], view: ViewStackItem, onPivot: Function} & Omit<DataManagerProps, 'subscribers' | 'setSubscribers'>> = ({data, view, onPivot, db, refreshData}) => {
+const PivotTable: React.FC<{data: any[], view: ViewStackItem, onPivot: Function} & Omit<DataManagerProps, 'subscribers'>> = ({data, view, onPivot, db, refreshData}) => {
     if (view.type !== 'pivot') return null;
 
     let columns: any[] = [];
@@ -326,7 +323,7 @@ const EditModal: React.FC<{
     editingItem: { table: TableName; item: any };
     onClose: () => void;
     onSave: (table: TableName, item: any) => void;
-    allData: DataManagerProps;
+    allData: Omit<DataManagerProps, 'setSubscribers' | 'setTags' | 'setCampaigns'>;
 }> = ({ editingItem, onClose, onSave, allData }) => {
     const { table, item } = editingItem;
     const [formData, setFormData] = useState(item);

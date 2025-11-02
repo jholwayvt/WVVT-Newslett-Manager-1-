@@ -84,14 +84,6 @@ const App: React.FC = () => {
     setActiveDatabaseId(id);
   }
 
-  // --- Prop-compatible State Setters ---
-  const createSetter = <T,>(updateFn: (db: dbService.DB, item: T) => Promise<void>) => async (action: React.SetStateAction<T[]>) => {
-    await refreshData();
-  };
-
-  const setTags = createSetter(dbService.updateTag);
-  const setCampaigns = createSetter(dbService.updateCampaign);
-
   const handleLogin = () => setIsLoggedIn(true);
   const handleLogout = () => setIsLoggedIn(false);
 
@@ -110,15 +102,31 @@ const App: React.FC = () => {
 
   const deleteCampaign = async (id: number) => {
     if (!db) return;
-    if (window.confirm('Are you sure you want to delete this draft?')) {
-        await dbService.deleteCampaign(db, id);
-        await refreshData();
-    }
+    await dbService.deleteCampaign(db, id);
+    await refreshData();
   };
   
   const handleEditCampaign = (id: number) => {
     setEditingCampaignId(id);
     setActiveView('COMPOSE');
+  };
+
+  const handleCloneCampaign = async (id: number) => {
+    if (!appData.activeDb) return;
+    const campaignToClone = appData.activeDb.campaigns.find(c => c.id === id);
+    if (!campaignToClone) return;
+
+    const newDraft: Omit<Campaign, 'id'> = {
+        ...campaignToClone,
+        subject: `[CLONE] ${campaignToClone.subject}`,
+        status: 'Draft',
+        sent_at: null,
+        recipient_count: 0,
+        recipients: [],
+    };
+
+    const newCampaign = await addCampaign(newDraft);
+    handleEditCampaign(newCampaign.id);
   };
 
   const handleComposeNew = () => {
@@ -148,7 +156,7 @@ const App: React.FC = () => {
         />;
     }
 
-    if (!appData.activeDb) {
+    if (!appData.activeDb || !db || !activeDatabaseId) {
       return (
         <div className="text-center p-10">
           <h2 className="text-2xl font-bold text-gray-700">No Active Database</h2>
@@ -164,7 +172,6 @@ const App: React.FC = () => {
       case 'DASHBOARD':
         return <Dashboard subscribers={subscribers} campaigns={campaigns} />;
       case 'SUBSCRIBERS':
-        if (!db || !activeDatabaseId) return null;
         return <Subscribers 
             db={db}
             activeDatabaseId={activeDatabaseId}
@@ -174,7 +181,13 @@ const App: React.FC = () => {
             campaigns={campaigns} 
         />;
       case 'TAGS':
-        return <Tags tags={tags} setTags={setTags} campaigns={campaigns} />;
+        return <Tags 
+            db={db}
+            activeDatabaseId={activeDatabaseId}
+            refreshData={refreshData}
+            tags={tags} 
+            campaigns={campaigns} 
+        />;
       case 'COMPOSE':
         return <Compose 
             subscribers={subscribers} 
@@ -184,20 +197,19 @@ const App: React.FC = () => {
             onFinish={() => setActiveView('CAMPAIGNS')} 
             campaignToEdit={campaignToEdit}
             campaigns={campaigns}
+            onComposeNew={handleComposeNew}
             key={editingCampaignId || 'new'}
         />;
       case 'CAMPAIGNS':
-        return <Campaigns campaigns={campaigns} subscribers={subscribers} handleEdit={handleEditCampaign} handleDelete={deleteCampaign} />;
+        return <Campaigns campaigns={campaigns} subscribers={subscribers} handleEdit={handleEditCampaign} handleDelete={deleteCampaign} handleClone={handleCloneCampaign} />;
       case 'DATA':
-        if (!db) return null;
-        const setSubscribers = createSetter(dbService.updateSubscriber); // Create setter for DataManager
         return <DataManager 
           db={db}
           refreshData={refreshData}
           databases={appData.databases}
-          subscribers={subscribers} setSubscribers={setSubscribers}
-          tags={tags} setTags={setTags}
-          campaigns={campaigns} setCampaigns={setCampaigns}
+          subscribers={subscribers}
+          tags={tags}
+          campaigns={campaigns}
         />;
       default:
         return <Dashboard subscribers={subscribers} campaigns={campaigns} />;

@@ -4,6 +4,7 @@ import { Subscriber, Tag, TagLogic, Campaign, AppSubscriber } from '../types';
 import { ICONS } from '../constants';
 import { generateNewsletterContent } from '../services/geminiService';
 import Modal from './Modal';
+import ConfirmationModal from './ConfirmationModal';
 import PdfPreview from './PdfPreview';
 
 // Custom hook for debouncing
@@ -28,9 +29,10 @@ interface ComposeProps {
     onFinish: () => void;
     campaignToEdit?: Campaign;
     campaigns: Campaign[]; // Pass all campaigns for subject line suggestions
+    onComposeNew: () => void;
 }
 
-const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updateCampaign, onFinish, campaignToEdit, campaigns }) => {
+const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updateCampaign, onFinish, campaignToEdit, campaigns, onComposeNew }) => {
     const [campaign, setCampaign] = useState<Campaign | Omit<Campaign, 'id'>>(() => 
         campaignToEdit || {
             subject: '', body: '', sent_at: null, recipient_count: 0, status: 'Draft', recipients: [],
@@ -54,8 +56,10 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
     const [isSubjectDropdownOpen, setIsSubjectDropdownOpen] = useState(false);
     const subjectInputContainerRef = useRef<HTMLDivElement>(null);
 
-    const uniqueSubjects = useMemo(() => [...new Set(campaigns.map(c => c.subject).filter(Boolean))], [campaigns]);
-    const filteredSubjects = uniqueSubjects.filter(s => s.toLowerCase().includes(subject.toLowerCase()) && s.toLowerCase() !== subject.toLowerCase());
+    const [isConfirmingSend, setIsConfirmingSend] = useState(false);
+
+    const draftCampaigns = useMemo(() => campaigns.filter(c => c.status === 'Draft'), [campaigns]);
+    const filteredSubjects = draftCampaigns.filter(c => c.subject.toLowerCase().includes(subject.toLowerCase()) && c.subject.toLowerCase() !== subject.toLowerCase());
 
 
     const debouncedCampaign = useDebounce(campaign, 2000);
@@ -90,7 +94,7 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
         if (saveStatus === 'unsaved') {
             setSaveStatus('saving');
             const handleAutoSave = async () => {
-                if ('id' in debouncedCampaign) {
+                if ('id' in debouncedCampaign && debouncedCampaign.id) {
                     updateCampaign(debouncedCampaign as Campaign);
                 } else {
                     const newCampaign = await addCampaign(debouncedCampaign as Omit<Campaign, 'id'>);
@@ -135,6 +139,16 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
             setCampaign(prev => ({ ...prev, [field]: value }));
         }
     };
+
+    const handleSubjectSelect = (selectedSubject: string) => {
+        const draft = draftCampaigns.find(c => c.subject === selectedSubject);
+        if (draft) {
+            setCampaign(draft); // Load the entire draft
+        } else {
+            updateCampaignField('subject', selectedSubject);
+        }
+        setIsSubjectDropdownOpen(false);
+    };
     
     const handleGenerateWithAi = async () => {
         if (!aiPrompt) return;
@@ -159,11 +173,15 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
             alert('This campaign has 0 recipients. Please adjust your audience filters.');
             return;
         }
-        if(!window.confirm(`This will send the campaign to ${recipientCount} subscribers. Are you sure?`)) return;
-
+        setIsConfirmingSend(true);
+    };
+    
+    const confirmSend = () => {
+        setIsConfirmingSend(false);
         setIsSending(true);
         const recipientIds = getRecipientIds();
 
+        // Simulate network delay for sending
         setTimeout(async () => {
             const finalCampaign: Omit<Campaign, 'id'> & {id?: number} = {
                 ...campaign,
@@ -173,23 +191,22 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
                 recipients: recipientIds,
             };
             
-            if ('id' in campaign) {
-                updateCampaign(finalCampaign as Campaign);
+            if ('id' in campaign && campaign.id) {
+                await updateCampaign(finalCampaign as Campaign);
             } else {
                 await addCampaign(finalCampaign);
             }
 
             setIsSending(false);
-            alert('Campaign sent successfully!');
             onFinish();
-        }, 2000);
-    };
+        }, 1500);
+    }
 
     const handleSaveDraft = () => {
         setSaveStatus('saving');
         setTimeout(async () => {
-            if ('id' in campaign) {
-                updateCampaign(campaign as Campaign);
+            if ('id' in campaign && campaign.id) {
+                await updateCampaign(campaign as Campaign);
             } else {
                 const newCampaign = await addCampaign(campaign);
                 setCampaign(newCampaign);
@@ -220,6 +237,13 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
                         <h1 className="text-3xl font-bold text-gray-800">{campaignToEdit ? 'Edit Campaign' : 'Compose Newsletter'}</h1>
                         <SaveStatusIndicator />
                     </div>
+                    {'id' in campaign && campaign.id && (
+                        <div className="mb-4 flex justify-end">
+                             <button onClick={onComposeNew} className="text-sm text-indigo-600 hover:underline font-semibold">
+                                + Start New Draft
+                             </button>
+                        </div>
+                    )}
                     <div className="space-y-4">
                         <div ref={subjectInputContainerRef} className="relative">
                             <input 
@@ -232,16 +256,14 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
                             />
                             {isSubjectDropdownOpen && filteredSubjects.length > 0 && (
                                 <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-md mt-1 max-h-48 overflow-y-auto shadow-lg">
-                                    {filteredSubjects.map(s => (
+                                    <li className="px-4 pt-2 pb-1 text-xs font-semibold text-gray-500">Load existing draft...</li>
+                                    {filteredSubjects.map(c => (
                                         <li 
-                                            key={s} 
+                                            key={c.id} 
                                             className="px-4 py-2 text-sm text-gray-700 hover:bg-indigo-100 cursor-pointer"
-                                            onClick={() => {
-                                                updateCampaignField('subject', s);
-                                                setIsSubjectDropdownOpen(false);
-                                            }}
+                                            onClick={() => handleSubjectSelect(c.subject)}
                                         >
-                                            {s}
+                                            {c.subject}
                                         </li>
                                     ))}
                                 </ul>
@@ -321,6 +343,17 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
                 <Modal title="PDF Preview" onClose={() => setShowPdfPreview(false)}>
                     <PdfPreview subject={subject} body={body} recipientCount={recipientCount} tagLogic={tagLogic} />
                 </Modal>
+            )}
+            {isConfirmingSend && (
+                <ConfirmationModal
+                    isOpen={isConfirmingSend}
+                    title="Confirm Campaign Send"
+                    message={`This will send the campaign "${subject}" to ${recipientCount} subscribers. This action cannot be undone.`}
+                    onConfirm={confirmSend}
+                    onCancel={() => setIsConfirmingSend(false)}
+                    confirmText="Send"
+                    isConfirming={isSending}
+                />
             )}
         </div>
     );
