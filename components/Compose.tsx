@@ -66,10 +66,11 @@ const Compose: React.FC<ComposeProps> = ({ subscribers, tags, addCampaign, updat
     const isFirstRender = useRef(true);
 
     const getRecipientIds = useCallback(() => {
+        const activeSubscribers = subscribers.filter(s => !s.unsubscribed_at);
         if (selectedTags.length === 0) {
-            return subscribers.map(s => s.id);
+            return activeSubscribers.map(s => s.id);
         }
-        return subscribers
+        return activeSubscribers
             .filter(sub => {
                 const subTags = new Set(sub.tags);
                 if (tagLogic === 'ANY') return selectedTags.some(tagId => subTags.has(tagId));

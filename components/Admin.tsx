@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Database, Tag, Subscriber, SocialLink } from '../types';
 import { ICONS } from '../constants';
@@ -92,7 +93,7 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
     event.target.value = '';
   };
   
-  const downloadTemplate = (type: 'subscribers' | 'tags' | 'campaigns' | 'sqlite') => {
+  const downloadTemplate = (type: 'databases' | 'subscribers' | 'tags' | 'campaigns' | 'subscriber_tags' | 'sqlite') => {
     if (type === 'sqlite') {
         const blankDb = dbService.createBlankDb();
         const data = blankDb.export();
@@ -107,9 +108,11 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
     }
       
     const headers = {
-        subscribers: 'name,email,external_id,tags',
-        tags: 'name',
-        campaigns: 'subject,body'
+        databases: 'id,name,description,logo_base64,street,city,state,zip_code,county,website,phone,fax_number,social_links_json,key_contact_name,key_contact_phone,key_contact_email',
+        subscribers: 'id,database_id,email,name,subscribed_at,external_id',
+        tags: 'id,database_id,name',
+        campaigns: 'id,database_id,subject,body,sent_at,recipient_count,status,target_tags_json,target_logic,recipients_json',
+        subscriber_tags: 'subscriber_id,tag_id'
     };
     const content = `data:text/csv;charset=utf-8,${headers[type]}\n`;
     const encodedUri = encodeURI(content);
@@ -162,11 +165,18 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
             </div>
         </div>
          <div>
-            <h2 className="text-xl font-semibold text-gray-800 mb-4">Templates</h2>
+            <h2 className="text-xl font-semibold text-gray-800 mb-4">Templates for Advanced Database Editing</h2>
+            <p className="text-sm text-gray-600 mb-3">
+                <strong className="text-red-600">For Advanced Users Only:</strong> These templates match the raw database schema. They are intended for populating a 
+                <code className="text-xs bg-gray-200 p-1 rounded mx-1">blank_template.sqlite3</code> file using an external tool like DB Browser for SQLite. 
+                <strong>These CSV templates are NOT compatible with the simplified importer on the Subscribers page.</strong> For standard subscriber imports, please use the template provided within the Import/Export dialog on the Subscribers page.
+            </p>
             <div className="flex flex-wrap gap-4">
+              <button onClick={() => downloadTemplate('databases')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Databases.csv</button>
               <button onClick={() => downloadTemplate('subscribers')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Subscribers.csv</button>
               <button onClick={() => downloadTemplate('tags')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Tags.csv</button>
               <button onClick={() => downloadTemplate('campaigns')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Campaigns.csv</button>
+              <button onClick={() => downloadTemplate('subscriber_tags')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Subscriber_Tags.csv</button>
               <button onClick={() => downloadTemplate('sqlite')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Blank Database.sqlite3</button>
             </div>
         </div>

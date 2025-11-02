@@ -47,6 +47,7 @@ const SCHEMA = `
         email TEXT NOT NULL,
         name TEXT NOT NULL,
         subscribed_at TEXT NOT NULL,
+        unsubscribed_at TEXT,
         external_id TEXT,
         UNIQUE(database_id, email),
         FOREIGN KEY(database_id) REFERENCES databases(id) ON DELETE CASCADE
@@ -81,14 +82,17 @@ const SCHEMA = `
 `;
 
 const runMigrations = (db: DB) => {
-    const columnsResult = db.exec("PRAGMA table_info(databases);");
-    if (!columnsResult || !columnsResult[0]) {
+    // Check for databases table first
+    const mainTableCheck = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='databases';");
+    if (mainTableCheck.length === 0) {
         db.exec(SCHEMA);
-        return;
+        return; // Schema created, no migrations needed.
     }
     
-    const columns = columnsResult[0].values.map((col: any) => col[1]);
-    const newColumns = [
+    // Migration for 'databases' table
+    const dbColumnsResult = db.exec("PRAGMA table_info(databases);");
+    const dbColumns = dbColumnsResult[0].values.map((col: any) => col[1]);
+    const newDbColumns = [
         { name: 'logo_base64', type: 'TEXT' }, { name: 'address', type: 'TEXT' },
         { name: 'website', type: 'TEXT' }, { name: 'phone', type: 'TEXT' },
         { name: 'social_links_json', type: 'TEXT' }, { name: 'street', type: 'TEXT' },
@@ -98,8 +102,8 @@ const runMigrations = (db: DB) => {
         { name: 'key_contact_phone', type: 'TEXT' }, { name: 'key_contact_email', type: 'TEXT' },
     ];
 
-    newColumns.forEach(col => {
-        if (!columns.includes(col.name)) {
+    newDbColumns.forEach(col => {
+        if (!dbColumns.includes(col.name)) {
             try {
                 db.exec(`ALTER TABLE databases ADD COLUMN ${col.name} ${col.type};`);
                 console.log(`Migrated: Added column ${col.name} to databases table.`);
@@ -108,6 +112,18 @@ const runMigrations = (db: DB) => {
             }
         }
     });
+
+    // Migration for 'subscribers' table
+    const subColumnsResult = db.exec("PRAGMA table_info(subscribers);");
+    const subColumns = subColumnsResult[0].values.map((col: any) => col[1]);
+     if (!subColumns.includes('unsubscribed_at')) {
+        try {
+            db.exec(`ALTER TABLE subscribers ADD COLUMN unsubscribed_at TEXT;`);
+            console.log(`Migrated: Added column unsubscribed_at to subscribers table.`);
+        } catch (e) {
+            console.error(`Migration failed for column unsubscribed_at:`, e);
+        }
+    }
 };
 
 
@@ -126,8 +142,8 @@ const createAndSeedDatabase = (sql: any): DB => {
     });
 
     MOCK_SUBSCRIBERS.forEach(sub => {
-        db.run('INSERT OR IGNORE INTO subscribers (id, database_id, email, name, subscribed_at) VALUES (?, ?, ?, ?, ?)', [
-            sub.id, dbId, sub.email, sub.name, sub.subscribed_at
+        db.run('INSERT OR IGNORE INTO subscribers (id, database_id, email, name, subscribed_at, unsubscribed_at) VALUES (?, ?, ?, ?, ?, ?)', [
+            sub.id, dbId, sub.email, sub.name, sub.subscribed_at, sub.unsubscribed_at
         ]);
         sub.tags.forEach(tagId => {
             db.run('INSERT OR IGNORE INTO subscriber_tags (subscriber_id, tag_id) VALUES (?, ?)', [sub.id, tagId]);
@@ -313,17 +329,17 @@ export const deleteDatabase = async (db: DB, id: number) => {
     saveDbToLocalStorage(db);
 }
 
-export const addSubscriber = async (db: DB, databaseId: number, sub: Omit<AppSubscriber, 'id' | 'subscribed_at'>): Promise<Subscriber> => {
+export const addSubscriber = async (db: DB, databaseId: number, sub: Omit<AppSubscriber, 'id' | 'subscribed_at' | 'unsubscribed_at'>): Promise<Subscriber> => {
     const id = Date.now();
     const subscribed_at = new Date().toISOString().split('T')[0];
-    db.run('INSERT INTO subscribers (id, database_id, email, name, subscribed_at, external_id) VALUES (?, ?, ?, ?, ?, ?)', [
-        id, databaseId, sub.email, sub.name, subscribed_at, sub.external_id || null
+    db.run('INSERT INTO subscribers (id, database_id, email, name, subscribed_at, unsubscribed_at, external_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+        id, databaseId, sub.email, sub.name, subscribed_at, null, sub.external_id || null
     ]);
     sub.tags.forEach(tagId => {
         db.run('INSERT INTO subscriber_tags (subscriber_id, tag_id) VALUES (?, ?)', [id, tagId]);
     });
     saveDbToLocalStorage(db);
-    return { ...sub, id, subscribed_at };
+    return { ...sub, id, subscribed_at, unsubscribed_at: null };
 };
 
 export const updateSubscriber = async (db: DB, sub: AppSubscriber) => {
@@ -334,6 +350,12 @@ export const updateSubscriber = async (db: DB, sub: AppSubscriber) => {
     });
     saveDbToLocalStorage(db);
 };
+
+export const setSubscriberStatus = async (db: DB, subscriberId: number, isSubscribed: boolean) => {
+    const unsubscribed_at = isSubscribed ? null : new Date().toISOString();
+    db.run('UPDATE subscribers SET unsubscribed_at = ? WHERE id = ?', [unsubscribed_at, subscriberId]);
+    saveDbToLocalStorage(db);
+}
 
 export const deleteSubscriber = async (db: DB, id: number) => {
     db.run('DELETE FROM subscribers WHERE id = ?', [id]);
@@ -416,68 +438,267 @@ export const unlinkTagFromSubscriber = async (db: DB, subscriberId: number, tagI
     saveDbToLocalStorage(db);
 };
 
+// --- BULK OPERATIONS ---
+export const bulkDeleteSubscribers = async (db: DB, subscriberIds: number[]): Promise<number> => {
+    if (subscriberIds.length === 0) return 0;
+    const placeholders = subscriberIds.map(() => '?').join(',');
+    db.run(`DELETE FROM subscribers WHERE id IN (${placeholders})`, subscriberIds);
+    const changes = db.getRowsModified();
+    if (changes > 0) saveDbToLocalStorage(db);
+    return changes;
+};
+
+export const bulkSetSubscriberStatus = async (db: DB, subscriberIds: number[], isSubscribed: boolean): Promise<number> => {
+    if (subscriberIds.length === 0) return 0;
+    const unsubscribed_at = isSubscribed ? null : new Date().toISOString();
+    const placeholders = subscriberIds.map(() => '?').join(',');
+    db.run(`UPDATE subscribers SET unsubscribed_at = ? WHERE id IN (${placeholders})`, [unsubscribed_at, ...subscriberIds]);
+    const changes = db.getRowsModified();
+    if (changes > 0) saveDbToLocalStorage(db);
+    return changes;
+};
+
+export const bulkAddTagsToSubscribers = async (db: DB, subscriberIds: number[], tagIds: number[]): Promise<number> => {
+    if (subscriberIds.length === 0 || tagIds.length === 0) return 0;
+    let totalChanges = 0;
+    const stmt = db.prepare('INSERT OR IGNORE INTO subscriber_tags (subscriber_id, tag_id) VALUES (?, ?)');
+    db.exec('BEGIN TRANSACTION');
+    try {
+        for (const subId of subscriberIds) {
+            for (const tagId of tagIds) {
+                stmt.run([subId, tagId]);
+                totalChanges += db.getRowsModified();
+            }
+        }
+        db.exec('COMMIT');
+    } catch (e) {
+        db.exec('ROLLBACK');
+        console.error("Bulk tag add transaction failed:", e);
+        throw e;
+    } finally {
+        stmt.free();
+    }
+    if (totalChanges > 0) saveDbToLocalStorage(db);
+    return totalChanges;
+};
+
+export const bulkRemoveTagsFromSubscribers = async (db: DB, subscriberIds: number[], tagIds: number[]): Promise<number> => {
+    if (subscriberIds.length === 0 || tagIds.length === 0) return 0;
+    const subPlaceholders = subscriberIds.map(() => '?').join(',');
+    const tagPlaceholders = tagIds.map(() => '?').join(',');
+    db.run(`DELETE FROM subscriber_tags WHERE subscriber_id IN (${subPlaceholders}) AND tag_id IN (${tagPlaceholders})`, [...subscriberIds, ...tagIds]);
+    const changes = db.getRowsModified();
+    if (changes > 0) saveDbToLocalStorage(db);
+    return changes;
+};
 
 // --- ADVANCED OPERATIONS ---
 
+/**
+ * A robust, state-machine-based CSV parser that handles quoted fields,
+ * escaped quotes, and newlines within fields.
+ * @param csvText The full raw string of the CSV file.
+ * @returns An object containing the header array and an array of row arrays.
+ */
+function parseCSV(csvText: string): { header: string[], rows: string[][] } {
+    const rows: string[][] = [];
+    let currentRow: string[] = [];
+    let currentField = '';
+    let inQuotes = false;
+
+    // Handle potential UTF-8 BOM (Byte Order Mark) from some editors like Excel
+    if (csvText.charCodeAt(0) === 0xFEFF) {
+        csvText = csvText.substring(1);
+    }
+    // Normalize line endings
+    csvText = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    for (let i = 0; i < csvText.length; i++) {
+        const char = csvText[i];
+        const nextChar = csvText[i + 1];
+
+        if (inQuotes) {
+            if (char === '"' && nextChar === '"') {
+                // This is an escaped quote ("")
+                currentField += '"';
+                i++; // Skip the next quote
+            } else if (char === '"') {
+                // End of quoted field
+                inQuotes = false;
+            } else {
+                currentField += char;
+            }
+        } else {
+            if (char === '"') {
+                inQuotes = true;
+            } else if (char === ',') {
+                currentRow.push(currentField);
+                currentField = '';
+            } else if (char === '\n') {
+                currentRow.push(currentField);
+                rows.push(currentRow);
+                currentRow = [];
+                currentField = '';
+            } else {
+                currentField += char;
+            }
+        }
+    }
+
+    // Add the final field and row if the file doesn't end with a newline
+    if (currentField || currentRow.length > 0) {
+        currentRow.push(currentField);
+        rows.push(currentRow);
+    }
+    
+    // Filter out potential empty final row
+    const nonEmptyRows = rows.filter(row => row.length > 1 || (row.length === 1 && row[0] !== ''));
+    const header = nonEmptyRows.shift()?.map(h => h.toLowerCase().trim()) || [];
+
+    return { header, rows: nonEmptyRows };
+}
+
+
 export const importSubscribersFromCSV = async (db: DB, databaseId: number, csvText: string): Promise<{ success: number, failed: number }> => {
-    const lines = csvText.split('\n');
-    const header = lines[0].trim().split(',').map(h => h.toLowerCase());
+    const { header, rows: dataRows } = parseCSV(csvText);
+    
+    if (dataRows.length === 0) {
+        return { success: 0, failed: 0 };
+    }
+
     const emailIndex = header.indexOf('email');
     if (emailIndex === -1) throw new Error("CSV must contain an 'email' column.");
 
     const nameIndex = header.indexOf('name');
     const externalIdIndex = header.indexOf('external_id');
     const tagsIndex = header.indexOf('tags');
-
-    const tagsStmt = db.prepare('SELECT id, name FROM tags WHERE database_id = ?');
-    const existingTags: Tag[] = parseResults(tagsStmt.bind([databaseId]));
-    const tagMap = new Map(existingTags.map(t => [t.name.toLowerCase(), t.id]));
+    const unsubscribedAtIndex = header.indexOf('unsubscribed_at');
 
     let success = 0;
     let failed = 0;
 
+    // Step 1: Pre-process and create all necessary tags
+    const allCsvTags = new Set<string>();
+    if (tagsIndex !== -1) {
+        dataRows.forEach(values => {
+            if (values.length > tagsIndex && values[tagsIndex]) {
+                try {
+                    const tagNames: string[] = JSON.parse(values[tagsIndex]);
+                    if (Array.isArray(tagNames)) {
+                        tagNames.forEach(tagName => {
+                            if (typeof tagName === 'string') {
+                                allCsvTags.add(tagName.trim());
+                            }
+                        });
+                    }
+                } catch (e) {
+                    // Ignore malformed JSON during this pre-processing step
+                }
+            }
+        });
+    }
+    
+    const tagsStmt = db.prepare('SELECT id, name FROM tags WHERE database_id = ?');
+    const existingTags: Tag[] = parseResults(tagsStmt.bind([databaseId]));
+    const tagMap = new Map(existingTags.map(t => [t.name.toLowerCase(), t.id]));
+    
+    const newTagsToCreate: string[] = [];
+    allCsvTags.forEach(tagName => {
+        if (tagName && !tagMap.has(tagName.toLowerCase())) {
+            newTagsToCreate.push(tagName);
+        }
+    });
+
+    if (newTagsToCreate.length > 0) {
+        db.exec('BEGIN TRANSACTION');
+        try {
+            const insertTagStmt = db.prepare('INSERT INTO tags (database_id, name) VALUES (?, ?)');
+            newTagsToCreate.forEach(tagName => {
+                insertTagStmt.run(databaseId, tagName);
+            });
+            insertTagStmt.free();
+            db.exec('COMMIT');
+        } catch (e) {
+            db.exec('ROLLBACK');
+            console.error("Failed to create new tags:", e);
+            throw new Error("Could not create new tags during import.");
+        }
+        
+        // Refresh the tag map with the newly created tags
+        const allTagsStmt = db.prepare('SELECT id, name FROM tags WHERE database_id = ?');
+        const allTags: Tag[] = parseResults(allTagsStmt.bind([databaseId]));
+        allTags.forEach(t => {
+            if (!tagMap.has(t.name.toLowerCase())) {
+                tagMap.set(t.name.toLowerCase(), t.id);
+            }
+        });
+    }
+
+    // Step 2: Process subscribers in a single transaction for performance and safety
     db.exec('BEGIN TRANSACTION');
     try {
-        for (let i = 1; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            const values = line.split(',');
+        const upsertSubStmt = db.prepare(`
+            INSERT INTO subscribers (database_id, email, name, external_id, unsubscribed_at, subscribed_at) 
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(database_id, email) DO UPDATE SET 
+                name=excluded.name, 
+                external_id=excluded.external_id,
+                unsubscribed_at=excluded.unsubscribed_at
+        `);
+        const selectSubIdStmt = db.prepare('SELECT id FROM subscribers WHERE database_id = ? AND email = ?');
+        const clearTagsStmt = db.prepare('DELETE FROM subscriber_tags WHERE subscriber_id = ?');
+        const linkTagStmt = db.prepare('INSERT INTO subscriber_tags (subscriber_id, tag_id) VALUES (?, ?)');
+
+        for (const values of dataRows) {
+            if (values.length <= emailIndex) {
+                failed++;
+                continue;
+            }
             const email = values[emailIndex]?.trim();
             if (!email) {
                 failed++;
                 continue;
             }
 
-            const name = values[nameIndex]?.trim() || email;
-            const externalId = values[externalIdIndex]?.trim() || null;
+            const name = (values.length > nameIndex && values[nameIndex]?.trim()) || email;
+            const externalId = (values.length > externalIdIndex && values[externalIdIndex]?.trim()) || null;
+            const unsubscribedAt = (unsubscribedAtIndex > -1 && values[unsubscribedAtIndex]?.trim()) || null;
 
-            // Upsert subscriber
-            db.run(`INSERT INTO subscribers (database_id, email, name, external_id, subscribed_at) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(database_id, email) DO UPDATE SET name=excluded.name, external_id=excluded.external_id`,
-                    [databaseId, email, name, externalId, new Date().toISOString().split('T')[0]]);
-
-            const subStmt = db.prepare('SELECT id FROM subscribers WHERE database_id = ? AND email = ?');
-            const subscriber = parseResults(subStmt.bind([databaseId, email]))[0];
-            if (!subscriber) {
-              failed++;
-              continue;
-            }
+            upsertSubStmt.run(databaseId, email, name, externalId, unsubscribedAt, new Date().toISOString().split('T')[0]);
             
-            // Handle tags
-            if (tagsIndex !== -1 && values[tagsIndex]) {
-                const tagNames = values[tagsIndex].replace(/"/g, '').split(';').map(t => t.trim()).filter(Boolean);
-                for (const tagName of tagNames) {
-                    let tagId = tagMap.get(tagName.toLowerCase());
-                    if (!tagId) {
-                        const tagResult = db.prepare('INSERT INTO tags (database_id, name) VALUES (?, ?) RETURNING id');
-                        tagId = parseResults(tagResult.bind([databaseId, tagName]))[0].id;
-                        tagMap.set(tagName.toLowerCase(), tagId);
+            const subResult = selectSubIdStmt.get([databaseId, email]);
+            if (!subResult || !subResult[0]) {
+                failed++;
+                continue;
+            }
+            const subscriberId = subResult[0];
+            selectSubIdStmt.reset();
+
+            // This is the crucial "upsert" step: clear old tags before adding new ones.
+            clearTagsStmt.run(subscriberId);
+
+            if (tagsIndex !== -1 && values.length > tagsIndex && values[tagsIndex]) {
+                 try {
+                    const tagNames: string[] = JSON.parse(values[tagsIndex]);
+                    if (Array.isArray(tagNames)) {
+                        for (const tagName of tagNames) {
+                            const tagId = tagMap.get(tagName.trim().toLowerCase());
+                            if (tagId) {
+                               linkTagStmt.run(subscriberId, tagId);
+                            }
+                        }
                     }
-                    db.run('INSERT OR IGNORE INTO subscriber_tags (subscriber_id, tag_id) VALUES (?, ?)', [subscriber.id, tagId]);
+                } catch (e) {
+                    console.warn(`Could not parse tags for ${email}:`, values[tagsIndex], e);
                 }
             }
             success++;
         }
+
+        upsertSubStmt.free();
+        selectSubIdStmt.free();
+        clearTagsStmt.free();
+        linkTagStmt.free();
         db.exec('COMMIT');
     } catch(e) {
         db.exec('ROLLBACK');
@@ -528,8 +749,8 @@ export const transferSubscribers = async (db: DB, payload: TransferPayload) => {
             // 3. Insert or Move Subscriber
             let newSubId = sub.id;
             if (mode === 'copy') {
-                const subResult = db.prepare(`INSERT INTO subscribers (database_id, email, name, subscribed_at) VALUES (?, ?, ?, ?) RETURNING id`);
-                newSubId = parseResults(subResult.bind([targetDbId, sub.email, sub.name, sub.subscribed_at]))[0].id;
+                const subResult = db.prepare(`INSERT INTO subscribers (database_id, email, name, subscribed_at, unsubscribed_at) VALUES (?, ?, ?, ?, ?) RETURNING id`);
+                newSubId = parseResults(subResult.bind([targetDbId, sub.email, sub.name, sub.subscribed_at, sub.unsubscribed_at]))[0].id;
             } else { // move
                 db.run('UPDATE subscribers SET database_id = ? WHERE id = ?', [targetDbId, sub.id]);
             }

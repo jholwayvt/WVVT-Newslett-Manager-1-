@@ -16,6 +16,7 @@ export interface Subscriber {
   email: string;
   name: string;
   subscribed_at: string;
+  unsubscribed_at: string | null;
   external_id?: string;
   // This is now populated at runtime from a join table
 }
