@@ -17,6 +17,7 @@ export interface Subscriber {
   name: string;
   subscribed_at: string;
   external_id?: string;
+  notes?: string; // Add notes field
   // This is now populated at runtime from a join table
 }
 
@@ -24,7 +25,7 @@ export interface Subscriber {
 export type AppSubscriber = Subscriber & { tags: number[] };
 
 export interface TagGroup {
-  id: string;
+  id:string;
   tags: number[];
   logic: TagLogic;
   atLeast?: number; // For 'AT_LEAST' logic

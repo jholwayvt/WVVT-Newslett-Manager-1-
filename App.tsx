@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Subscriber, Tag, Campaign, Database, AppSubscriber } from './types';
 import * as dbService from './services/dbService';
@@ -316,6 +317,7 @@ const App: React.FC = () => {
       case 'DATA':
         return <DataManager 
           db={db}
+          activeDatabaseId={activeDatabaseId}
           refreshData={refreshData}
           databases={appData.databases}
           subscribers={subscribers}

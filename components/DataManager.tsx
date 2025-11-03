@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Subscriber, Tag, Campaign, ViewStackItem, TableName, PivotTarget, Database, SocialLink, AppSubscriber as AppSubscriberType } from '../types';
+
+
+import React, { useState, useEffect } from 'react';
+import { Subscriber, Tag, Campaign, ViewStackItem, TableName, PivotTarget, Database, AppSubscriber as AppSubscriberType } from '../types';
 import Modal from './Modal';
 import ConfirmationModal from './ConfirmationModal';
 import { ICONS } from '../constants';
 import * as dbService from '../services/dbService';
+import { InputField, TextAreaField } from './FormControls';
+import MultiSelectCheckboxes from './MultiSelectCheckboxes';
+import CompanyProfileModal from './CompanyProfileModal';
 
 type AppSubscriber = AppSubscriberType;
 type SimpleDb = Omit<Database, 'subscribers' | 'tags' | 'campaigns'>;
@@ -11,6 +16,7 @@ type SimpleDb = Omit<Database, 'subscribers' | 'tags' | 'campaigns'>;
 // --- PROPS ---
 interface DataManagerProps {
   db: dbService.DB;
+  activeDatabaseId: number;
   refreshData: () => Promise<void>;
   databases: SimpleDb[];
   subscribers: AppSubscriber[];
@@ -22,8 +28,9 @@ interface DataManagerProps {
 const DataManager: React.FC<DataManagerProps> = (props) => {
   const [viewStack, setViewStack] = useState<ViewStackItem[]>([{ type: 'table', name: 'Subscribers' }]);
   const [editingItem, setEditingItem] = useState<{ table: TableName; item: AppSubscriber | Tag | Campaign } | null>(null);
-  const [editingDatabase, setEditingDatabase] = useState<SimpleDb | null>(null);
-  const [isDbModalOpen, setIsDbModalOpen] = useState(false);
+  const [editingCompanyProfile, setEditingCompanyProfile] = useState<SimpleDb | null>(null);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   
   // State for bulk editing
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -79,24 +86,40 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
   };
 
   const handleExport = () => {
-    const dataToExport = getFilteredData();
-    if (dataToExport.length === 0) {
-      alert("No data in the current view to export.");
-      return;
+    if (currentView.type !== 'table') {
+        alert("Export is only available for main table views.");
+        return;
+    }
+    const { name } = currentView;
+
+    let headers: string[];
+    let rows: any[][];
+    const data = getFilteredData();
+    if (data.length === 0) {
+        alert("No data in the current view to export.");
+        return;
+    }
+
+    if (name === 'Subscribers') {
+        headers = ['id', 'name', 'email', 'external_id', 'subscribed_at', 'tags', 'notes'];
+        rows = props.subscribers.map(sub => {
+            const tagNames = sub.tags.map(tagId => props.tags.find(t => t.id === tagId)?.name).filter(Boolean);
+            return [sub.id, sub.name, sub.email, sub.external_id || '', sub.subscribed_at, JSON.stringify(tagNames), sub.notes || ''];
+        });
+    } else {
+        headers = Object.keys(data[0]);
+        rows = data.map(item =>
+            headers.map(header => {
+                const value = item[header];
+                if (typeof value === 'object' && value !== null) {
+                    return JSON.stringify(value);
+                }
+                return value;
+            })
+        );
     }
     
-    const headers = Object.keys(dataToExport[0]);
-    const rows = dataToExport.map(item =>
-      headers.map(header => {
-        const value = item[header];
-        if (typeof value === 'object' && value !== null) {
-          return JSON.stringify(value);
-        }
-        return value;
-      })
-    );
-
-    const filename = `export_${currentView.type === 'table' ? currentView.name : currentView.to}.csv`;
+    const filename = `export_${name}.csv`;
     const csvContent = dbService.generateCsvContent(headers, rows);
     dbService.downloadFile(filename, csvContent, "text/csv;charset=utf-8,");
   };
@@ -113,7 +136,7 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
    const handleSaveDatabase = async (data: SimpleDb) => {
       await dbService.updateDatabase(props.db, data);
       await props.refreshData();
-      setIsDbModalOpen(false);
+      setIsProfileModalOpen(false);
    };
    
   const handleBulkDelete = async () => {
@@ -142,7 +165,7 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
         case 'Campaigns':
           return <GenericTable title="Campaigns" data={data} columns={campaignColumns(pushView)} onEdit={(item) => handleEdit('Campaigns', item)} selection={selectionProps} />;
         case 'Companies':
-          return <GenericTable title="Companies" data={data} columns={companyColumns()} onEdit={(item) => {setEditingDatabase(item); setIsDbModalOpen(true);}} readOnlyActions={['delete']} />;
+          return <GenericTable title="Companies" data={data} columns={companyColumns()} onEdit={(item) => {setEditingCompanyProfile(item); setIsProfileModalOpen(true);}} readOnlyActions={['delete']} />;
       }
     } else { // Pivot view
       return <PivotTable data={data} view={currentView} {...props} onPivot={pushView} />
@@ -158,6 +181,12 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
             <Breadcrumbs stack={viewStack} onNavigate={goToView} />
           </div>
           <div className="flex space-x-2">
+            {currentView.type === 'table' && (
+              <button onClick={() => setIsImportModalOpen(true)} className="px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-md hover:bg-green-700 inline-flex items-center">
+                {ICONS.upload}
+                <span className="ml-2">Import View (CSV)</span>
+              </button>
+            )}
             <button onClick={handleExport} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 inline-flex items-center">
                 {ICONS.download}
                 <span className="ml-2">Export View (CSV)</span>
@@ -202,11 +231,24 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
           />
       )}
 
-      {isDbModalOpen && editingDatabase && (
-        <DatabaseModal
-          dbToEdit={editingDatabase}
-          onClose={() => setIsDbModalOpen(false)}
+      {isProfileModalOpen && editingCompanyProfile && (
+        <CompanyProfileModal
+          profileToEdit={editingCompanyProfile}
+          onClose={() => setIsProfileModalOpen(false)}
           onSave={handleSaveDatabase}
+        />
+      )}
+
+      {isImportModalOpen && currentView.type === 'table' && (
+        <ImportModal
+          tableName={currentView.name}
+          db={props.db}
+          activeDatabaseId={props.activeDatabaseId}
+          onClose={() => setIsImportModalOpen(false)}
+          onComplete={async () => {
+            setIsImportModalOpen(false);
+            await props.refreshData();
+          }}
         />
       )}
 
@@ -265,6 +307,7 @@ const Breadcrumbs: React.FC<{ stack: ViewStackItem[], onNavigate: (index: number
 
 const subscriberColumns = (onPivot: Function) => [
     { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Email', accessor: 'email' },
+    { header: 'Notes', render: (item: Subscriber) => <div className="max-w-xs truncate" title={item.notes}>{item.notes}</div> },
     { header: 'Pivot To', render: (item: Subscriber) => (
         <div className="space-x-2">
             <button onClick={() => onPivot({ type: 'pivot', from: 'Subscribers', fromId: item.id, fromName: item.name, to: 'Tags'})} className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded">Tags</button>
@@ -380,6 +423,95 @@ const GenericTable: React.FC<{
     </div>
 )};
 
+// --- IMPORT MODAL ---
+const ImportModal: React.FC<{
+    tableName: TableName,
+    db: dbService.DB,
+    activeDatabaseId: number,
+    onClose: () => void,
+    onComplete: () => Promise<void>
+}> = ({ tableName, db, activeDatabaseId, onClose, onComplete }) => {
+    const [importing, setImporting] = useState(false);
+    const [importResult, setImportResult] = useState<{ success: number; failed: number } | null>(null);
+    const [error, setError] = useState('');
+
+    const instructions = {
+        Subscribers: `Requires 'email' column. Updates existing subscribers based on email. 'tags' column should be a JSON array of strings, e.g., ["VIP", "New"]. 'notes' field can contain multi-line text. New tags are created automatically.`,
+        Tags: `Requires 'name' column. Use 'id' column to update existing tags; otherwise, new tags will be created.`,
+        Campaigns: `Use 'id' to update. Requires 'subject' and 'status'. JSON fields ('recipients_json', 'target_groups_json') must contain valid JSON strings.`,
+        Companies: `Use 'id' to update existing company profiles. 'name' is required. 'social_links_json' must be a valid JSON array.`
+    };
+
+    const templates = {
+        Subscribers: 'id,name,email,external_id,tags,notes\n1,"John Doe","john@example.com","ext123","[\"VIP\", \"New Customer\"]","This is a note about John."',
+        Tags: 'id,name\n1,"VIP"',
+        Campaigns: 'id,subject,status,body,target_groups_json,recipients_json\n1,"My Subject","Draft","<p>Hello</p>","{\\"groups\\":[],\\"groupsLogic\\":\\"AND\\"}","[]"',
+        Companies: 'id,name,description\n1,"My Company","A description..."'
+    };
+
+    const handleDownloadTemplate = () => {
+        dbService.downloadFile(`${tableName}_template.csv`, templates[tableName], 'text/csv;charset=utf-8,');
+    };
+    
+    const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        setImporting(true);
+        setImportResult(null);
+        setError('');
+
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const text = e.target?.result as string;
+            try {
+                const result = await dbService.importDataFromCSV(db, tableName, activeDatabaseId, text);
+                setImportResult(result);
+                await onComplete();
+            } catch (err: any) {
+                setError(`Import failed: ${err.message}`);
+                console.error(err);
+            } finally {
+                setImporting(false);
+            }
+        };
+        reader.readAsText(file);
+        event.target.value = ''; // Allow re-uploading the same file
+    };
+
+    return (
+        <Modal title={`Import ${tableName}`} onClose={onClose}>
+            <div className="space-y-4">
+                <div>
+                    <h4 className="font-semibold text-gray-800">Instructions</h4>
+                    <p className="text-sm text-gray-600 mt-1">{instructions[tableName]}</p>
+                </div>
+                <div className="flex flex-wrap gap-4">
+                    <button onClick={handleDownloadTemplate} className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-md shadow-sm hover:bg-gray-200">
+                        {ICONS.download}
+                        <span className="ml-2">Download Template</span>
+                    </button>
+                    <label className={`inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white border border-transparent rounded-md shadow-sm cursor-pointer ${importing ? 'bg-green-300' : 'bg-green-600 hover:bg-green-700'}`}>
+                        {ICONS.upload}
+                        <span className="ml-2">{importing ? 'Processing...' : 'Choose CSV File'}</span>
+                        <input type='file' className="hidden" accept=".csv" onChange={handleImport} disabled={importing} />
+                    </label>
+                </div>
+                {importing && <p className="text-center text-blue-600 font-semibold">Importing data, please wait...</p>}
+                {error && <div className="mt-4 p-3 rounded-md bg-red-100 text-red-700 text-sm">{error}</div>}
+                {importResult && (
+                    <div className="mt-4 p-3 rounded-md bg-gray-100 text-sm">
+                        <p className="font-semibold">Import Complete</p>
+                        <p className="text-green-700">{importResult.success} rows successfully imported or updated.</p>
+                        <p className="text-red-700">{importResult.failed} rows failed (e.g., missing required fields or malformed).</p>
+                    </div>
+                )}
+            </div>
+        </Modal>
+    );
+};
+
+
 // --- BULK ACTION COMPONENTS ---
 const BulkActionBar: React.FC<{
     count: number;
@@ -461,8 +593,8 @@ const EditModal: React.FC<{
 
     const renderForm = () => {
         switch (table) {
-            case 'Subscribers': return <> <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} /> <InputField label="Email" type="email" value={formData.email} onChange={val => handleChange('email', val)} /> <MultiSelectCheckboxes label="Tags" options={allData.tags} selectedIds={formData.tags} onChange={ids => handleChange('tags', ids)} /> </>;
-            case 'Tags': return <> <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} /> <MultiSelectCheckboxes label="Subscribers with this tag" options={allData.subscribers} selectedIds={formData.subscribers} onChange={ids => handleChange('subscribers', ids)} /> <MultiSelectCheckboxes label="Draft campaigns targeting this tag" options={allData.campaigns.filter(c => c.status === 'Draft').map(c => ({ id: c.id, name: c.subject }))} selectedIds={formData.campaigns} onChange={ids => handleChange('campaigns', ids)} /> </>;
+            case 'Subscribers': return <> <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} /> <InputField label="Email" type="email" value={formData.email} onChange={val => handleChange('email', val)} /> <TextAreaField label="Notes" value={formData.notes || ''} onChange={val => handleChange('notes', val)} /> <MultiSelectCheckboxes label="Tags" options={allData.tags} selectedIds={formData.tags} onChange={ids => handleChange('tags', ids)} /> </>;
+            case 'Tags': return <> <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} /> <MultiSelectCheckboxes label="Subscribers with this tag" options={allData.subscribers} selectedIds={formData.subscribers || []} onChange={ids => handleChange('subscribers', ids)} /> <MultiSelectCheckboxes label="Draft campaigns targeting this tag" options={allData.campaigns.filter(c => c.status === 'Draft').map(c => ({ id: c.id, name: c.subject }))} selectedIds={formData.campaigns || []} onChange={ids => handleChange('campaigns', ids)} /> </>;
             case 'Campaigns': return (formData.status === 'Draft' ? <> <InputField label="Subject" value={formData.subject} onChange={val => handleChange('subject', val)} /> <TextAreaField label="Body" value={formData.body} onChange={val => handleChange('body', val)} /> <TextAreaField label="Target Groups (JSON)" value={JSON.stringify(formData.target.groups, null, 2)} onChange={val => { try { const groups = JSON.parse(val); if (Array.isArray(groups)) { setFormData((p: any) => ({...p, target: {...p.target, groups: groups}})) } } catch (e) {} }} /> </> : <p>Only draft campaigns can be edited here.</p>);
             default: return null;
         }
@@ -474,23 +606,6 @@ const EditModal: React.FC<{
             <div className="mt-6 flex justify-end space-x-2"> <button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button> <button onClick={() => onSave(table, formData)} className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700" disabled={table === 'Campaigns' && formData.status !== 'Draft'}>Save</button> </div>
         </Modal>
     );
-};
-
-const DatabaseModal: React.FC<{ dbToEdit: SimpleDb; onClose: () => void; onSave: (data: SimpleDb) => void; }> = ({ dbToEdit, onClose, onSave }) => {
-  const [data, setData] = useState<SimpleDb>(dbToEdit);
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setData(prev => ({...prev, logo_base64: reader.result as string})); reader.readAsDataURL(file); } };
-  const handleSocialChange = (index: number, field: 'platform' | 'url', value: string) => { const newLinks = [...(data.social_links || [])]; newLinks[index] = { ...newLinks[index], [field]: value }; setData(prev => ({ ...prev, social_links: newLinks })); };
-  const addSocialLink = () => { if ((data.social_links?.length || 0) < 4) setData(prev => ({...prev, social_links: [...(prev.social_links || []), {platform: 'Other', url: ''}]})); };
-  const removeSocialLink = (index: number) => setData(prev => ({...prev, social_links: data.social_links?.filter((_, i) => i !== index)}));
-  const handleSubmit = (e: React.FormEvent) => { e.preventDefault(); if (data.name.trim()) onSave(data); };
-  return (<Modal title='Edit Company Profile' onClose={onClose}> <form onSubmit={handleSubmit} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2"> <InputField label="Company Name" value={data.name} onChange={val => setData(p => ({...p, name: val}))} required /> <TextAreaField label="Description" value={data.description || ''} onChange={val => setData(p => ({...p, description: val}))} /> <div> <label className="block text-sm font-medium text-gray-700">Logo</label> <div className="mt-1 flex items-center space-x-4"> {data.logo_base64 && <img src={data.logo_base64} alt="logo preview" className="w-16 h-16 rounded-md object-cover" />} <input type="file" accept="image/*" onChange={handleFileChange} className="text-sm" /> </div> </div> <hr/> <h3 className="text-lg font-semibold text-gray-800 pt-2">Contact Information</h3> <InputField label="Website URL" type="url" value={data.website || ''} onChange={val => setData(p => ({...p, website: val}))} /> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="Phone Number" type="tel" value={data.phone || ''} onChange={val => setData(p => ({...p, phone: val}))} /> <InputField label="Fax Number" type="tel" value={data.fax_number || ''} onChange={val => setData(p => ({...p, fax_number: val}))} /> </div> <h4 className="font-semibold text-gray-700 pt-2">Address</h4> <InputField label="Street" value={data.street || ''} onChange={val => setData(p => ({...p, street: val}))} /> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="City" value={data.city || ''} onChange={val => setData(p => ({...p, city: val}))} /> <InputField label="State / Province" value={data.state || ''} onChange={val => setData(p => ({...p, state: val}))} /> </div> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="Zip / Postal Code" value={data.zip_code || ''} onChange={val => setData(p => ({...p, zip_code: val}))} /> <InputField label="County" value={data.county || ''} onChange={val => setData(p => ({...p, county: val}))} /> </div> <hr/> <h3 className="text-lg font-semibold text-gray-800 pt-2">Key Contact</h3> <InputField label="Contact Name" value={data.key_contact_name || ''} onChange={val => setData(p => ({...p, key_contact_name: val}))} /> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="Contact Phone" type="tel" value={data.key_contact_phone || ''} onChange={val => setData(p => ({...p, key_contact_phone: val}))} /> <InputField label="Contact Email" type="email" value={data.key_contact_email || ''} onChange={val => setData(p => ({...p, key_contact_email: val}))} /> </div> <hr/> <div className="pt-2"> <label className="block text-sm font-medium text-gray-700">Social Media Links (Max 4)</label> <div className="space-y-2 mt-1"> {data.social_links?.map((link, index) => ( <div key={index} className="flex items-center space-x-2"> <select value={link.platform} onChange={e => handleSocialChange(index, 'platform', e.target.value)} className="w-1/3 px-3 py-2 border border-gray-300 rounded-md text-sm"> {(['Facebook', 'Twitter', 'LinkedIn', 'Instagram', 'Other'] as SocialLink['platform'][]).map(p => <option key={p} value={p}>{p}</option>)} </select> <input type="url" placeholder="https://..." value={link.url} onChange={e => handleSocialChange(index, 'url', e.target.value)} className="flex-grow px-3 py-2 border border-gray-300 rounded-md text-sm" /> <button type="button" onClick={() => removeSocialLink(index)} className="text-red-500 hover:text-red-700 p-1">{ICONS.trash}</button> </div> ))} {(data.social_links?.length || 0) < 4 && <button type="button" onClick={addSocialLink} className="text-sm text-indigo-600 hover:underline">+ Add Link</button>} </div> </div> <div className="pt-4 flex justify-end space-x-3 border-t"> <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button> <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700">Save</button> </div> </form> </Modal>); };
-const InputField: React.FC<{label: string, value: string, onChange: (val: string) => void, type?: string, required?: boolean}> = ({label, value, onChange, type="text", required=false}) => ( <div> <label className="block text-sm font-medium text-gray-700">{label}</label> <input type={type} value={value} onChange={e => onChange(e.target.value)} required={required} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" /> </div> );
-const TextAreaField: React.FC<{label: string, value: string, onChange: (val: string) => void}> = ({label, value, onChange}) => ( <div> <label className="block text-sm font-medium text-gray-700">{label}</label> <textarea value={value} onChange={e => onChange(e.target.value)} rows={5} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm font-mono" /> </div> );
-const MultiSelectCheckboxes: React.FC<{ label: string, options: {id: number, name: string}[], selectedIds: number[], onChange: (ids: number[]) => void, }> = ({ label, options, selectedIds, onChange }) => {
-    const [searchTerm, setSearchTerm] = useState('');
-    const filteredOptions = useMemo(() => options.filter(opt => opt.name.toLowerCase().includes(searchTerm.toLowerCase())), [options, searchTerm]);
-    const handleToggle = (id: number) => onChange(selectedIds.includes(id) ? selectedIds.filter(i => i !== id) : [...selectedIds, id]);
-    return ( <div> <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label> <input type="text" placeholder="Search..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md mb-2" /> <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-md p-2 space-y-1"> {filteredOptions.map(opt => ( <label key={opt.id} className="flex items-center space-x-2 p-1 rounded hover:bg-gray-100 cursor-pointer"> <input type="checkbox" checked={selectedIds.includes(opt.id)} onChange={() => handleToggle(opt.id)} className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500" /> <span className="text-sm text-gray-800">{opt.name}</span> </label> ))} </div> </div> );
 };
 
 export default DataManager;
