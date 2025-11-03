@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { Subscriber, Tag, Campaign, ViewStackItem, TableName, PivotTarget, Database, SocialLink } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Subscriber, Tag, Campaign, ViewStackItem, TableName, PivotTarget, Database, SocialLink, AppSubscriber as AppSubscriberType } from '../types';
 import Modal from './Modal';
+import ConfirmationModal from './ConfirmationModal';
 import { ICONS } from '../constants';
 import * as dbService from '../services/dbService';
 
-type AppSubscriber = Subscriber & { tags: number[] };
+type AppSubscriber = AppSubscriberType;
 type SimpleDb = Omit<Database, 'subscribers' | 'tags' | 'campaigns'>;
 
 // --- PROPS ---
@@ -23,8 +24,18 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
   const [editingItem, setEditingItem] = useState<{ table: TableName; item: AppSubscriber | Tag | Campaign } | null>(null);
   const [editingDatabase, setEditingDatabase] = useState<SimpleDb | null>(null);
   const [isDbModalOpen, setIsDbModalOpen] = useState(false);
+  
+  // State for bulk editing
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [isBulkEditModalOpen, setIsBulkEditModalOpen] = useState(false);
+  const [isBulkDeleteModalOpen, setIsBulkDeleteModalOpen] = useState(false);
 
   const currentView = viewStack[viewStack.length - 1];
+
+  // Clear selection when view changes
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [viewStack]);
 
   const pushView = (view: ViewStackItem) => setViewStack(prev => [...prev, view]);
   const goToView = (index: number) => setViewStack(prev => prev.slice(0, index + 1));
@@ -36,7 +47,7 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
     Companies: props.databases,
   };
 
-  const getFilteredData = () => {
+  const getFilteredData = (): any[] => {
     if (currentView.type === 'table') {
       return allData[currentView.name];
     }
@@ -53,7 +64,7 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
       return props.subscribers.filter(s => s.tags.includes(fromId));
     }
     if (from === 'Tags' && to === 'Campaigns') {
-      return props.campaigns.filter(c => (c.status === 'Sent' || c.status === 'Draft') && c.target?.tags.includes(fromId));
+      return props.campaigns.filter(c => (c.status === 'Sent' || c.status === 'Draft') && c.target?.groups?.some(g => g.tags.includes(fromId)));
     }
     if (from === 'Campaigns' && to === 'Subscribers') {
         const campaign = props.campaigns.find(c => c.id === fromId);
@@ -61,47 +72,40 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
     }
     if (from === 'Campaigns' && to === 'Tags') {
         const campaign = props.campaigns.find(c => c.id === fromId);
-        return campaign ? props.tags.filter(t => campaign.target?.tags.includes(t.id)) : [];
+        const tagIdsInCampaign = new Set(campaign?.target?.groups.flatMap(g => g.tags) || []);
+        return campaign ? props.tags.filter(t => tagIdsInCampaign.has(t.id)) : [];
     }
     return [];
   };
 
   const handleExport = () => {
     const dataToExport = getFilteredData();
-    if(dataToExport.length === 0) {
+    if (dataToExport.length === 0) {
       alert("No data in the current view to export.");
       return;
     }
     
-    const headers = Object.keys(dataToExport[0]).filter(key => typeof dataToExport[0][key] !== 'object').join(',');
-    const rows = dataToExport.map(item => 
-      Object.entries(item)
-        .filter(([key, val]) => typeof val !== 'object')
-        .map(([key, val]) => Array.isArray(val) ? `"${val.join(';')}"` : `"${val}"`)
-        .join(',')
+    const headers = Object.keys(dataToExport[0]);
+    const rows = dataToExport.map(item =>
+      headers.map(header => {
+        const value = item[header];
+        if (typeof value === 'object' && value !== null) {
+          return JSON.stringify(value);
+        }
+        return value;
+      })
     );
-    
-    let csvContent = `data:text/csv;charset=utf-8,${headers}\n${rows.join('\n')}`;
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `export_${currentView.type === 'table' ? currentView.name : currentView.to}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }
+
+    const filename = `export_${currentView.type === 'table' ? currentView.name : currentView.to}.csv`;
+    const csvContent = dbService.generateCsvContent(headers, rows);
+    dbService.downloadFile(filename, csvContent, "text/csv;charset=utf-8,");
+  };
 
   const handleSaveItem = async (table: TableName, updatedItem: any) => {
     const { db, refreshData } = props;
-    if (table === 'Subscribers') {
-        await dbService.updateSubscriber(db, updatedItem);
-    }
-    if (table === 'Tags') {
-        await dbService.updateTagWithRelations(db, updatedItem);
-    }
-    if (table === 'Campaigns') {
-        await dbService.updateCampaign(db, updatedItem);
-    }
+    if (table === 'Subscribers') await dbService.updateSubscriber(db, updatedItem);
+    if (table === 'Tags') await dbService.updateTagWithRelations(db, updatedItem);
+    if (table === 'Campaigns') await dbService.updateCampaign(db, updatedItem);
     setEditingItem(null);
     await refreshData();
   }
@@ -111,27 +115,32 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
       await props.refreshData();
       setIsDbModalOpen(false);
    };
+   
+  const handleBulkDelete = async () => {
+    if (currentView.type !== 'table') return;
+    const tableName = currentView.name;
+    await dbService.bulkDeleteItems(props.db, tableName, selectedIds);
+    await props.refreshData();
+    setSelectedIds([]);
+    setIsBulkDeleteModalOpen(false);
+  };
 
   const renderCurrentView = () => {
     const data = getFilteredData();
     const handleEdit = (table: TableName, item: any) => setEditingItem({table, item});
-    const handleDelete = async (table: TableName, id: number) => {
-        if (!window.confirm(`Are you sure you want to delete this ${table.slice(0, -1)}?`)) return;
-        if (table === 'Subscribers') await dbService.deleteSubscriber(props.db, id);
-        if (table === 'Tags') await dbService.deleteTag(props.db, id);
-        if (table === 'Campaigns') await dbService.deleteCampaign(props.db, id);
-        await props.refreshData();
-    }
 
+    const selectionProps = currentView.type === 'table' && currentView.name !== 'Companies' 
+        ? { selectedIds, onSelectionChange: setSelectedIds, data } 
+        : undefined;
 
     if (currentView.type === 'table') {
       switch (currentView.name) {
         case 'Subscribers':
-          return <GenericTable title="Subscribers" data={data} columns={subscriberColumns(pushView)} onEdit={(item) => handleEdit('Subscribers', item)} onDelete={(id) => handleDelete('Subscribers', id)} />;
+          return <GenericTable title="Subscribers" data={data} columns={subscriberColumns(pushView)} onEdit={(item) => handleEdit('Subscribers', item)} selection={selectionProps} />;
         case 'Tags':
-          return <GenericTable title="Tags" data={data} columns={tagColumns(pushView)} onEdit={(item) => handleEdit('Tags', item)} onDelete={(id) => handleDelete('Tags', id)} />;
+          return <GenericTable title="Tags" data={data} columns={tagColumns(pushView)} onEdit={(item) => handleEdit('Tags', item)} selection={selectionProps} />;
         case 'Campaigns':
-          return <GenericTable title="Campaigns" data={data} columns={campaignColumns(pushView)} onEdit={(item) => handleEdit('Campaigns', item)} onDelete={(id) => handleDelete('Campaigns', id)} />;
+          return <GenericTable title="Campaigns" data={data} columns={campaignColumns(pushView)} onEdit={(item) => handleEdit('Campaigns', item)} selection={selectionProps} />;
         case 'Companies':
           return <GenericTable title="Companies" data={data} columns={companyColumns()} onEdit={(item) => {setEditingDatabase(item); setIsDbModalOpen(true);}} readOnlyActions={['delete']} />;
       }
@@ -172,6 +181,16 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
         ))}
       </div>
       
+      {selectedIds.length > 0 && currentView.type === 'table' && (
+        <BulkActionBar
+            count={selectedIds.length}
+            tableName={currentView.name}
+            onClear={() => setSelectedIds([])}
+            onBulkEdit={() => setIsBulkEditModalOpen(true)}
+            onBulkDelete={() => setIsBulkDeleteModalOpen(true)}
+        />
+      )}
+      
       {renderCurrentView()}
       
       {editingItem && (
@@ -188,6 +207,30 @@ const DataManager: React.FC<DataManagerProps> = (props) => {
           dbToEdit={editingDatabase}
           onClose={() => setIsDbModalOpen(false)}
           onSave={handleSaveDatabase}
+        />
+      )}
+
+      {isBulkEditModalOpen && currentView.type === 'table' && currentView.name === 'Subscribers' && (
+        <BulkEditSubscribersModal
+            db={props.db}
+            allTags={props.tags}
+            subscriberIds={selectedIds}
+            onClose={() => setIsBulkEditModalOpen(false)}
+            onComplete={async () => {
+                await props.refreshData();
+                setSelectedIds([]);
+                setIsBulkEditModalOpen(false);
+            }}
+        />
+      )}
+      {isBulkDeleteModalOpen && currentView.type === 'table' && (
+        <ConfirmationModal
+            isOpen={isBulkDeleteModalOpen}
+            title={`Bulk Delete ${currentView.name}`}
+            message={`Are you sure you want to permanently delete ${selectedIds.length} selected item(s)? This action cannot be undone.`}
+            onConfirm={handleBulkDelete}
+            onCancel={() => setIsBulkDeleteModalOpen(false)}
+            confirmText="Delete"
         />
       )}
     </div>
@@ -250,13 +293,7 @@ const campaignColumns = (onPivot: Function) => [
     )}
 ];
 
-const companyColumns = () => [
-    { header: 'ID', accessor: 'id' },
-    { header: 'Name', accessor: 'name' },
-    { header: 'Contact', accessor: 'key_contact_name' },
-    { header: 'Phone', accessor: 'phone' },
-    { header: 'Email', accessor: 'key_contact_email' },
-];
+const companyColumns = () => [ { header: 'ID', accessor: 'id' }, { header: 'Name', accessor: 'name' }, { header: 'Contact', accessor: 'key_contact_name' }, { header: 'Phone', accessor: 'phone' }, { header: 'Email', accessor: 'key_contact_email' }, ];
 
 const PivotTable: React.FC<{data: any[], view: ViewStackItem, onPivot: Function} & Omit<DataManagerProps, 'subscribers'>> = ({data, view, onPivot, db, refreshData}) => {
     if (view.type !== 'pivot') return null;
@@ -269,11 +306,10 @@ const PivotTable: React.FC<{data: any[], view: ViewStackItem, onPivot: Function}
         await refreshData();
     }
     
-    // Define columns based on pivot context
     if (view.to === 'Subscribers') columns = subscriberColumns(onPivot);
     if (view.to === 'Tags') {
         columns = tagColumns(onPivot);
-        if (view.from === 'Subscribers') { // Add unlink action
+        if (view.from === 'Subscribers') {
             columns = columns.map(c => c.header !== 'Pivot To' ? c : { ...c, header: 'Actions', render: (item: Tag) => (
                 <button onClick={() => unlinkTagFromSubscriber(view.fromId, item.id)} className="px-2 py-1 text-xs bg-red-100 text-red-800 rounded">Unlink</button>
             )});
@@ -285,19 +321,47 @@ const PivotTable: React.FC<{data: any[], view: ViewStackItem, onPivot: Function}
 }
 
 
-// --- GENERIC TABLE RENDERER ---
-const GenericTable: React.FC<{title: string, data: any[], columns: any[], onDelete?: (id: number) => void, onEdit?: (item: any) => void, readOnly?: boolean, readOnlyActions?: ('edit' | 'delete')[]}> = ({ title, data, columns, onDelete, onEdit, readOnly = false, readOnlyActions = [] }) => (
+const GenericTable: React.FC<{
+    title: string;
+    data: any[];
+    columns: any[];
+    onEdit?: (item: any) => void;
+    readOnly?: boolean;
+    readOnlyActions?: ('edit' | 'delete')[];
+    selection?: {
+        selectedIds: number[];
+        onSelectionChange: (ids: number[]) => void;
+        data: any[];
+    }
+}> = ({ title, data, columns, onEdit, readOnly = false, readOnlyActions = [], selection }) => {
+    const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!selection) return;
+        selection.onSelectionChange(e.target.checked ? selection.data.map(item => item.id) : []);
+    };
+
+    const handleSelectOne = (e: React.ChangeEvent<HTMLInputElement>, id: number) => {
+        if (!selection) return;
+        const { selectedIds, onSelectionChange } = selection;
+        if (e.target.checked) onSelectionChange([...selectedIds, id]);
+        else onSelectionChange(selectedIds.filter(i => i !== id));
+    };
+    
+    const isAllSelected = selection ? selection.selectedIds.length === selection.data.length && selection.data.length > 0 : false;
+    
+    return (
     <div className="bg-white rounded-xl shadow-md overflow-x-auto">
         <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
                 <tr>
+                    {selection && <th className="px-4 py-3"><input type="checkbox" className="h-4 w-4 text-indigo-600 border-gray-300 rounded" checked={isAllSelected} onChange={handleSelectAll} /></th>}
                     {columns.map(col => <th key={col.header} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{col.header}</th>)}
                     {!readOnly && <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>}
                 </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
                 {data.map(item => (
-                    <tr key={item.id}>
+                    <tr key={item.id} className={selection?.selectedIds.includes(item.id) ? 'bg-indigo-50' : ''}>
+                        {selection && <td className="px-4 py-3"><input type="checkbox" className="h-4 w-4 text-indigo-600 border-gray-300 rounded" checked={selection.selectedIds.includes(item.id)} onChange={e => handleSelectOne(e, item.id)} /></td>}
                         {columns.map(col => (
                             <td key={col.header} className="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">
                                 {col.render ? col.render(item) : item[col.accessor]}
@@ -306,7 +370,6 @@ const GenericTable: React.FC<{title: string, data: any[], columns: any[], onDele
                         {!readOnly && (
                             <td className="px-4 py-3 whitespace-nowrap">
                                 {!readOnlyActions.includes('edit') && <button onClick={() => onEdit && onEdit(item)} className="text-indigo-600 hover:text-indigo-900 mr-2">{ICONS.edit}</button>}
-                                {!readOnlyActions.includes('delete') && <button onClick={() => onDelete && onDelete(item.id)} className="text-red-500 hover:text-red-700">{ICONS.trash}</button>}
                             </td>
                         )}
                     </tr>
@@ -315,10 +378,66 @@ const GenericTable: React.FC<{title: string, data: any[], columns: any[], onDele
         </table>
         {data.length === 0 && <p className="p-4 text-center text-gray-500">No items found.</p>}
     </div>
+)};
+
+// --- BULK ACTION COMPONENTS ---
+const BulkActionBar: React.FC<{
+    count: number;
+    tableName: TableName;
+    onClear: () => void;
+    onBulkEdit: () => void;
+    onBulkDelete: () => void;
+}> = ({ count, tableName, onClear, onBulkEdit, onBulkDelete }) => (
+    <div className="fixed bottom-5 right-5 z-40 bg-white p-4 rounded-lg shadow-2xl flex items-center space-x-4 border border-gray-200 animate-fade-in-up">
+        <span className="text-sm font-semibold text-gray-800">{count} {tableName} selected</span>
+        {tableName === 'Subscribers' && <button onClick={onBulkEdit} className="px-3 py-1.5 text-sm text-white bg-indigo-600 rounded-md hover:bg-indigo-700">Bulk Edit Tags</button>}
+        {tableName !== 'Companies' && <button onClick={onBulkDelete} className="px-3 py-1.5 text-sm text-white bg-red-600 rounded-md hover:bg-red-700">Delete</button>}
+        <button onClick={onClear} className="text-gray-500 hover:text-gray-800 text-sm font-medium">Cancel</button>
+    </div>
 );
 
+const BulkEditSubscribersModal: React.FC<{
+    db: dbService.DB;
+    allTags: Tag[];
+    subscriberIds: number[];
+    onClose: () => void;
+    onComplete: () => void;
+}> = ({ db, allTags, subscriberIds, onClose, onComplete }) => {
+    const [mode, setMode] = useState<'add' | 'remove' | 'reset'>('add');
+    const [tagsToAdd, setTagsToAdd] = useState<number[]>([]);
+    const [tagsToRemove, setTagsToRemove] = useState<number[]>([]);
+    const [isSaving, setIsSaving] = useState(false);
+    
+    const handleSave = async () => {
+        setIsSaving(true);
+        await dbService.bulkUpdateSubscriberTags(db, subscriberIds, tagsToAdd, tagsToRemove, mode);
+        setIsSaving(false);
+        onComplete();
+    };
 
-// --- EDIT MODAL & MULTI-SELECT ---
+    return (
+        <Modal title={`Bulk Edit ${subscriberIds.length} Subscribers`} onClose={onClose}>
+            <div className="flex border-b">
+                <button onClick={() => setMode('add')} className={`px-4 py-2 text-sm ${mode === 'add' ? 'border-b-2 border-indigo-500 font-semibold' : ''}`}>Add Tags</button>
+                <button onClick={() => setMode('remove')} className={`px-4 py-2 text-sm ${mode === 'remove' ? 'border-b-2 border-indigo-500 font-semibold' : ''}`}>Remove Tags</button>
+                <button onClick={() => setMode('reset')} className={`px-4 py-2 text-sm ${mode === 'reset' ? 'border-b-2 border-indigo-500 font-semibold' : ''}`}>Reset Tags</button>
+            </div>
+            <div className="py-4 space-y-4">
+                {mode === 'add' && <MultiSelectCheckboxes label="Tags to Add" options={allTags} selectedIds={tagsToAdd} onChange={setTagsToAdd} />}
+                {mode === 'remove' && <MultiSelectCheckboxes label="Tags to Remove" options={allTags} selectedIds={tagsToRemove} onChange={setTagsToRemove} />}
+                {mode === 'reset' && <MultiSelectCheckboxes label="Set Tags To" options={allTags} selectedIds={tagsToAdd} onChange={setTagsToAdd} />}
+            </div>
+             <div className="mt-6 flex justify-end space-x-3">
+                <button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button>
+                <button onClick={handleSave} disabled={isSaving} className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:bg-indigo-300">
+                    {isSaving ? 'Saving...' : 'Apply Changes'}
+                </button>
+            </div>
+        </Modal>
+    );
+};
+
+// --- EDIT MODAL & FORM FIELDS ---
 const EditModal: React.FC<{
     editingItem: { table: TableName; item: any };
     onClose: () => void;
@@ -329,229 +448,49 @@ const EditModal: React.FC<{
     const [formData, setFormData] = useState(item);
 
     useEffect(() => {
-        // When editing a tag, we need to find its relationships to prepopulate the multi-selects
         if (table === 'Tags') {
             const relatedSubscribers = allData.subscribers.filter(s => s.tags.includes(item.id)).map(s => s.id);
-            const relatedCampaigns = allData.campaigns.filter(c => c.status === 'Draft' && c.target.tags.includes(item.id)).map(c => c.id);
+            const relatedCampaigns = allData.campaigns.filter(c => c.status === 'Draft' && c.target.groups?.some(g => g.tags.includes(item.id))).map(c => c.id);
             setFormData({ ...item, subscribers: relatedSubscribers, campaigns: relatedCampaigns });
         } else {
             setFormData(item);
         }
     }, [item, table, allData]);
 
-    const handleChange = (field: string, value: any) => {
-        setFormData((prev: any) => ({ ...prev, [field]: value }));
-    };
+    const handleChange = (field: string, value: any) => setFormData((prev: any) => ({ ...prev, [field]: value }));
 
     const renderForm = () => {
         switch (table) {
-            case 'Subscribers':
-                return <>
-                    <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} />
-                    <InputField label="Email" type="email" value={formData.email} onChange={val => handleChange('email', val)} />
-                    <MultiSelectCheckboxes 
-                        label="Tags"
-                        options={allData.tags.map(t => ({ id: t.id, name: t.name }))}
-                        selectedIds={formData.tags}
-                        onChange={ids => handleChange('tags', ids)}
-                    />
-                </>;
-            case 'Tags':
-                return <>
-                    <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} />
-                    <MultiSelectCheckboxes 
-                        label="Subscribers with this tag"
-                        options={allData.subscribers.map(s => ({ id: s.id, name: s.name }))}
-                        selectedIds={formData.subscribers}
-                        onChange={ids => handleChange('subscribers', ids)}
-                    />
-                    <MultiSelectCheckboxes 
-                        label="Draft campaigns targeting this tag"
-                        options={allData.campaigns.filter(c => c.status === 'Draft').map(c => ({ id: c.id, name: c.subject }))}
-                        selectedIds={formData.campaigns}
-                        onChange={ids => handleChange('campaigns', ids)}
-                    />
-                </>;
-            case 'Campaigns':
-                return (
-                    formData.status === 'Draft' ? <>
-                        <InputField label="Subject" value={formData.subject} onChange={val => handleChange('subject', val)} />
-                        <TextAreaField label="Body" value={formData.body} onChange={val => handleChange('body', val)} />
-                        <MultiSelectCheckboxes 
-                            label="Target Tags"
-                            options={allData.tags.map(t => ({ id: t.id, name: t.name }))}
-                            selectedIds={formData.target.tags}
-                            onChange={ids => setFormData((p: any) => ({...p, target: {...p.target, tags: ids}}))}
-                        />
-                    </> : <p>Only draft campaigns can be edited here.</p>
-                );
+            case 'Subscribers': return <> <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} /> <InputField label="Email" type="email" value={formData.email} onChange={val => handleChange('email', val)} /> <MultiSelectCheckboxes label="Tags" options={allData.tags} selectedIds={formData.tags} onChange={ids => handleChange('tags', ids)} /> </>;
+            case 'Tags': return <> <InputField label="Name" value={formData.name} onChange={val => handleChange('name', val)} /> <MultiSelectCheckboxes label="Subscribers with this tag" options={allData.subscribers} selectedIds={formData.subscribers} onChange={ids => handleChange('subscribers', ids)} /> <MultiSelectCheckboxes label="Draft campaigns targeting this tag" options={allData.campaigns.filter(c => c.status === 'Draft').map(c => ({ id: c.id, name: c.subject }))} selectedIds={formData.campaigns} onChange={ids => handleChange('campaigns', ids)} /> </>;
+            case 'Campaigns': return (formData.status === 'Draft' ? <> <InputField label="Subject" value={formData.subject} onChange={val => handleChange('subject', val)} /> <TextAreaField label="Body" value={formData.body} onChange={val => handleChange('body', val)} /> <TextAreaField label="Target Groups (JSON)" value={JSON.stringify(formData.target.groups, null, 2)} onChange={val => { try { const groups = JSON.parse(val); if (Array.isArray(groups)) { setFormData((p: any) => ({...p, target: {...p.target, groups: groups}})) } } catch (e) {} }} /> </> : <p>Only draft campaigns can be edited here.</p>);
             default: return null;
         }
     }
 
     return (
         <Modal title={`Edit ${table.slice(0, -1)}`} onClose={onClose}>
-            <div className="space-y-4">
-                {renderForm()}
-            </div>
-            <div className="mt-6 flex justify-end space-x-2">
-                <button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button>
-                <button onClick={() => onSave(table, formData)} className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700" disabled={table === 'Campaigns' && formData.status !== 'Draft'}>Save</button>
-            </div>
+            <div className="space-y-4">{renderForm()}</div>
+            <div className="mt-6 flex justify-end space-x-2"> <button onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button> <button onClick={() => onSave(table, formData)} className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700" disabled={table === 'Campaigns' && formData.status !== 'Draft'}>Save</button> </div>
         </Modal>
     );
 };
 
-const DatabaseModal: React.FC<{
-  dbToEdit: SimpleDb;
-  onClose: () => void;
-  onSave: (data: SimpleDb) => void;
-}> = ({ dbToEdit, onClose, onSave }) => {
+const DatabaseModal: React.FC<{ dbToEdit: SimpleDb; onClose: () => void; onSave: (data: SimpleDb) => void; }> = ({ dbToEdit, onClose, onSave }) => {
   const [data, setData] = useState<SimpleDb>(dbToEdit);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setData(prev => ({...prev, logo_base64: reader.result as string}));
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-  
-  const handleSocialChange = (index: number, field: 'platform' | 'url', value: string) => {
-    const newLinks = [...(data.social_links || [])];
-    newLinks[index] = { ...newLinks[index], [field]: value };
-    setData(prev => ({ ...prev, social_links: newLinks }));
-  };
-  
-  const addSocialLink = () => {
-    if ((data.social_links?.length || 0) < 4) {
-      setData(prev => ({...prev, social_links: [...(prev.social_links || []), {platform: 'Other', url: ''}]}));
-    }
-  }
-
-  const removeSocialLink = (index: number) => {
-    setData(prev => ({...prev, social_links: data.social_links?.filter((_, i) => i !== index)}));
-  }
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (data.name.trim()) {
-      onSave(data);
-    }
-  };
-
-  return (
-    <Modal title='Edit Company Profile' onClose={onClose}>
-      <form onSubmit={handleSubmit} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
-        <InputField label="Company Name" value={data.name} onChange={val => setData(p => ({...p, name: val}))} required />
-        <TextAreaField label="Description" value={data.description || ''} onChange={val => setData(p => ({...p, description: val}))} />
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Logo</label>
-          <div className="mt-1 flex items-center space-x-4">
-            {data.logo_base64 && <img src={data.logo_base64} alt="logo preview" className="w-16 h-16 rounded-md object-cover" />}
-            <input type="file" accept="image/*" onChange={handleFileChange} className="text-sm" />
-          </div>
-        </div>
-
-        <hr/>
-        <h3 className="text-lg font-semibold text-gray-800 pt-2">Contact Information</h3>
-        <InputField label="Website URL" type="url" value={data.website || ''} onChange={val => setData(p => ({...p, website: val}))} />
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <InputField label="Phone Number" type="tel" value={data.phone || ''} onChange={val => setData(p => ({...p, phone: val}))} />
-            <InputField label="Fax Number" type="tel" value={data.fax_number || ''} onChange={val => setData(p => ({...p, fax_number: val}))} />
-        </div>
-        
-        <h4 className="font-semibold text-gray-700 pt-2">Address</h4>
-        <InputField label="Street" value={data.street || ''} onChange={val => setData(p => ({...p, street: val}))} />
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <InputField label="City" value={data.city || ''} onChange={val => setData(p => ({...p, city: val}))} />
-          <InputField label="State / Province" value={data.state || ''} onChange={val => setData(p => ({...p, state: val}))} />
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <InputField label="Zip / Postal Code" value={data.zip_code || ''} onChange={val => setData(p => ({...p, zip_code: val}))} />
-          <InputField label="County" value={data.county || ''} onChange={val => setData(p => ({...p, county: val}))} />
-        </div>
-        
-        <hr/>
-        <h3 className="text-lg font-semibold text-gray-800 pt-2">Key Contact</h3>
-        <InputField label="Contact Name" value={data.key_contact_name || ''} onChange={val => setData(p => ({...p, key_contact_name: val}))} />
-         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <InputField label="Contact Phone" type="tel" value={data.key_contact_phone || ''} onChange={val => setData(p => ({...p, key_contact_phone: val}))} />
-            <InputField label="Contact Email" type="email" value={data.key_contact_email || ''} onChange={val => setData(p => ({...p, key_contact_email: val}))} />
-        </div>
-
-        <hr/>
-        <div className="pt-2">
-          <label className="block text-sm font-medium text-gray-700">Social Media Links (Max 4)</label>
-          <div className="space-y-2 mt-1">
-            {data.social_links?.map((link, index) => (
-              <div key={index} className="flex items-center space-x-2">
-                <select value={link.platform} onChange={e => handleSocialChange(index, 'platform', e.target.value)} className="w-1/3 px-3 py-2 border border-gray-300 rounded-md text-sm">
-                  {(['Facebook', 'Twitter', 'LinkedIn', 'Instagram', 'Other'] as SocialLink['platform'][]).map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-                <input type="url" placeholder="https://..." value={link.url} onChange={e => handleSocialChange(index, 'url', e.target.value)} className="flex-grow px-3 py-2 border border-gray-300 rounded-md text-sm" />
-                <button type="button" onClick={() => removeSocialLink(index)} className="text-red-500 hover:text-red-700 p-1">{ICONS.trash}</button>
-              </div>
-            ))}
-             {(data.social_links?.length || 0) < 4 && <button type="button" onClick={addSocialLink} className="text-sm text-indigo-600 hover:underline">+ Add Link</button>}
-          </div>
-        </div>
-
-        <div className="pt-4 flex justify-end space-x-3 border-t">
-          <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button>
-          <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700">Save</button>
-        </div>
-      </form>
-    </Modal>
-  );
-};
-
-const InputField: React.FC<{label: string, value: string, onChange: (val: string) => void, type?: string, required?: boolean}> = ({label, value, onChange, type="text", required=false}) => (
-    <div>
-        <label className="block text-sm font-medium text-gray-700">{label}</label>
-        <input type={type} value={value} onChange={e => onChange(e.target.value)} required={required} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
-    </div>
-);
-
-const TextAreaField: React.FC<{label: string, value: string, onChange: (val: string) => void}> = ({label, value, onChange}) => (
-     <div>
-        <label className="block text-sm font-medium text-gray-700">{label}</label>
-        <textarea value={value} onChange={e => onChange(e.target.value)} rows={5} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm font-mono" />
-    </div>
-);
-
-const MultiSelectCheckboxes: React.FC<{
-    label: string,
-    options: {id: number, name: string}[],
-    selectedIds: number[],
-    onChange: (ids: number[]) => void,
-}> = ({ label, options, selectedIds, onChange }) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => { const file = e.target.files?.[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => setData(prev => ({...prev, logo_base64: reader.result as string})); reader.readAsDataURL(file); } };
+  const handleSocialChange = (index: number, field: 'platform' | 'url', value: string) => { const newLinks = [...(data.social_links || [])]; newLinks[index] = { ...newLinks[index], [field]: value }; setData(prev => ({ ...prev, social_links: newLinks })); };
+  const addSocialLink = () => { if ((data.social_links?.length || 0) < 4) setData(prev => ({...prev, social_links: [...(prev.social_links || []), {platform: 'Other', url: ''}]})); };
+  const removeSocialLink = (index: number) => setData(prev => ({...prev, social_links: data.social_links?.filter((_, i) => i !== index)}));
+  const handleSubmit = (e: React.FormEvent) => { e.preventDefault(); if (data.name.trim()) onSave(data); };
+  return (<Modal title='Edit Company Profile' onClose={onClose}> <form onSubmit={handleSubmit} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2"> <InputField label="Company Name" value={data.name} onChange={val => setData(p => ({...p, name: val}))} required /> <TextAreaField label="Description" value={data.description || ''} onChange={val => setData(p => ({...p, description: val}))} /> <div> <label className="block text-sm font-medium text-gray-700">Logo</label> <div className="mt-1 flex items-center space-x-4"> {data.logo_base64 && <img src={data.logo_base64} alt="logo preview" className="w-16 h-16 rounded-md object-cover" />} <input type="file" accept="image/*" onChange={handleFileChange} className="text-sm" /> </div> </div> <hr/> <h3 className="text-lg font-semibold text-gray-800 pt-2">Contact Information</h3> <InputField label="Website URL" type="url" value={data.website || ''} onChange={val => setData(p => ({...p, website: val}))} /> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="Phone Number" type="tel" value={data.phone || ''} onChange={val => setData(p => ({...p, phone: val}))} /> <InputField label="Fax Number" type="tel" value={data.fax_number || ''} onChange={val => setData(p => ({...p, fax_number: val}))} /> </div> <h4 className="font-semibold text-gray-700 pt-2">Address</h4> <InputField label="Street" value={data.street || ''} onChange={val => setData(p => ({...p, street: val}))} /> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="City" value={data.city || ''} onChange={val => setData(p => ({...p, city: val}))} /> <InputField label="State / Province" value={data.state || ''} onChange={val => setData(p => ({...p, state: val}))} /> </div> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="Zip / Postal Code" value={data.zip_code || ''} onChange={val => setData(p => ({...p, zip_code: val}))} /> <InputField label="County" value={data.county || ''} onChange={val => setData(p => ({...p, county: val}))} /> </div> <hr/> <h3 className="text-lg font-semibold text-gray-800 pt-2">Key Contact</h3> <InputField label="Contact Name" value={data.key_contact_name || ''} onChange={val => setData(p => ({...p, key_contact_name: val}))} /> <div className="grid grid-cols-1 md:grid-cols-2 gap-4"> <InputField label="Contact Phone" type="tel" value={data.key_contact_phone || ''} onChange={val => setData(p => ({...p, key_contact_phone: val}))} /> <InputField label="Contact Email" type="email" value={data.key_contact_email || ''} onChange={val => setData(p => ({...p, key_contact_email: val}))} /> </div> <hr/> <div className="pt-2"> <label className="block text-sm font-medium text-gray-700">Social Media Links (Max 4)</label> <div className="space-y-2 mt-1"> {data.social_links?.map((link, index) => ( <div key={index} className="flex items-center space-x-2"> <select value={link.platform} onChange={e => handleSocialChange(index, 'platform', e.target.value)} className="w-1/3 px-3 py-2 border border-gray-300 rounded-md text-sm"> {(['Facebook', 'Twitter', 'LinkedIn', 'Instagram', 'Other'] as SocialLink['platform'][]).map(p => <option key={p} value={p}>{p}</option>)} </select> <input type="url" placeholder="https://..." value={link.url} onChange={e => handleSocialChange(index, 'url', e.target.value)} className="flex-grow px-3 py-2 border border-gray-300 rounded-md text-sm" /> <button type="button" onClick={() => removeSocialLink(index)} className="text-red-500 hover:text-red-700 p-1">{ICONS.trash}</button> </div> ))} {(data.social_links?.length || 0) < 4 && <button type="button" onClick={addSocialLink} className="text-sm text-indigo-600 hover:underline">+ Add Link</button>} </div> </div> <div className="pt-4 flex justify-end space-x-3 border-t"> <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button> <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700">Save</button> </div> </form> </Modal>); };
+const InputField: React.FC<{label: string, value: string, onChange: (val: string) => void, type?: string, required?: boolean}> = ({label, value, onChange, type="text", required=false}) => ( <div> <label className="block text-sm font-medium text-gray-700">{label}</label> <input type={type} value={value} onChange={e => onChange(e.target.value)} required={required} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" /> </div> );
+const TextAreaField: React.FC<{label: string, value: string, onChange: (val: string) => void}> = ({label, value, onChange}) => ( <div> <label className="block text-sm font-medium text-gray-700">{label}</label> <textarea value={value} onChange={e => onChange(e.target.value)} rows={5} className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm font-mono" /> </div> );
+const MultiSelectCheckboxes: React.FC<{ label: string, options: {id: number, name: string}[], selectedIds: number[], onChange: (ids: number[]) => void, }> = ({ label, options, selectedIds, onChange }) => {
     const [searchTerm, setSearchTerm] = useState('');
-    const filteredOptions = options.filter(opt => opt.name.toLowerCase().includes(searchTerm.toLowerCase()));
-
-    const handleToggle = (id: number) => {
-        const newIds = selectedIds.includes(id) ? selectedIds.filter(i => i !== id) : [...selectedIds, id];
-        onChange(newIds);
-    }
-    
-    return (
-        <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-             <input type="text" placeholder="Search..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md mb-2" />
-            <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-md p-2 space-y-1">
-                {filteredOptions.map(opt => (
-                    <label key={opt.id} className="flex items-center space-x-2 p-1 rounded hover:bg-gray-100 cursor-pointer">
-                        <input type="checkbox" checked={selectedIds.includes(opt.id)} onChange={() => handleToggle(opt.id)} className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500" />
-                        <span className="text-sm text-gray-800">{opt.name}</span>
-                    </label>
-                ))}
-            </div>
-        </div>
-    );
+    const filteredOptions = useMemo(() => options.filter(opt => opt.name.toLowerCase().includes(searchTerm.toLowerCase())), [options, searchTerm]);
+    const handleToggle = (id: number) => onChange(selectedIds.includes(id) ? selectedIds.filter(i => i !== id) : [...selectedIds, id]);
+    return ( <div> <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label> <input type="text" placeholder="Search..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md mb-2" /> <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-md p-2 space-y-1"> {filteredOptions.map(opt => ( <label key={opt.id} className="flex items-center space-x-2 p-1 rounded hover:bg-gray-100 cursor-pointer"> <input type="checkbox" checked={selectedIds.includes(opt.id)} onChange={() => handleToggle(opt.id)} className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500" /> <span className="text-sm text-gray-800">{opt.name}</span> </label> ))} </div> </div> );
 };
-
 
 export default DataManager;

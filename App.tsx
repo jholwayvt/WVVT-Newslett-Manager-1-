@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { View, Subscriber, Tag, Campaign, Database } from './types';
+
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { View, Subscriber, Tag, Campaign, Database, AppSubscriber } from './types';
 import * as dbService from './services/dbService';
 import LoginScreen from './components/LoginScreen';
 import Sidebar from './components/Sidebar';
@@ -27,42 +28,65 @@ const App: React.FC = () => {
   const [appData, setAppData] = useState<AppData>({ databases: [], activeDb: null });
   const [activeDatabaseId, setActiveDatabaseId] = useState<number | null>(null);
   
-  // Initialize DB on mount
-  useEffect(() => {
-    const init = async () => {
-      try {
-        const database = await dbService.initDB();
-        setDb(database);
-        const activeId = dbService.getActiveDbId();
-        // If there are databases but no active one, activate the first one.
-        const dbs = await dbService.getDatabases(database);
-        if (dbs.length > 0 && !activeId) {
-            dbService.setActiveDbId(dbs[0].id);
-            setActiveDatabaseId(dbs[0].id);
-        } else {
-            setActiveDatabaseId(activeId);
-        }
-      } catch (error) {
-        console.error("Failed to initialize database:", error);
-        alert("Fatal Error: Could not initialize database. Please clear site data and try again.");
+  // Use a ref to track sending status to prevent multiple concurrent scheduler runs
+  const isSchedulerRunning = useRef(false);
+  
+  // Centralized initialization and data loading logic
+  const initializeApp = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const database = await dbService.initDB();
+      setDb(database);
+      const dbs = await dbService.getDatabases(database);
+      let activeId = dbService.getActiveDbId();
+
+      // Validate the stored active ID. If it doesn't exist in the current list of DBs, it's stale.
+      if (activeId && !dbs.some(db => db.id === activeId)) {
+        console.warn(`Stored active database ID ${activeId} was not found in the database. Clearing it.`);
+        activeId = null;
+        dbService.setActiveDbId(null);
       }
-    };
-    init();
+
+      // If there are databases but no active one is set, activate the first one.
+      if (dbs.length > 0 && !activeId) {
+        const newActiveId = dbs[0].id;
+        dbService.setActiveDbId(newActiveId);
+        setActiveDatabaseId(newActiveId);
+      } else {
+        setActiveDatabaseId(activeId);
+      }
+    } catch (error) {
+      console.error("Failed to initialize database:", error);
+      alert("Fatal Error: Could not initialize database. Please clear site data and try again.");
+    }
   }, []);
+  
+  // Initial load on mount
+  useEffect(() => {
+    initializeApp();
+  }, [initializeApp]);
   
   // Load data whenever DB or active ID changes
   useEffect(() => {
     if (!db) return;
+
     const loadData = async () => {
       setIsLoading(true);
       const dbs = await dbService.getDatabases(db);
       let activeDbData: Database | null = null;
       if (activeDatabaseId) {
-        activeDbData = await dbService.getDatabaseContents(db, activeDatabaseId);
+        try {
+          activeDbData = await dbService.getDatabaseContents(db, activeDatabaseId);
+        } catch (e) {
+            console.warn(`Could not load database ID ${activeDatabaseId}, it may have been deleted. Resetting active DB.`, e);
+            dbService.setActiveDbId(null);
+            setActiveDatabaseId(null);
+        }
       }
       setAppData({ databases: dbs, activeDb: activeDbData });
       setIsLoading(false);
     };
+
     loadData();
   }, [db, activeDatabaseId]);
 
@@ -74,6 +98,57 @@ const App: React.FC = () => {
     setAppData({ databases: dbs, activeDb: activeDbData });
   }, [db, activeDatabaseId]);
 
+  // --- Campaign Scheduler ---
+  useEffect(() => {
+    const checkAndSendScheduledCampaigns = async () => {
+        if (!db || !appData.activeDb || isSchedulerRunning.current) {
+            return;
+        }
+
+        isSchedulerRunning.current = true;
+
+        try {
+            const dueCampaigns = await dbService.getDueCampaigns(db, appData.activeDb.id);
+            
+            if (dueCampaigns.length > 0) {
+                console.log(`Scheduler found ${dueCampaigns.length} campaign(s) to send.`);
+                
+                for (const campaign of dueCampaigns) {
+                    // Fix: Pass the whole campaign.target object, not just the groups array.
+                    const recipientIds = dbService.getRecipientIds(campaign.target, appData.activeDb.subscribers);
+                    
+                    // Mark as sending
+                    await dbService.updateCampaign(db, { ...campaign, status: 'Sending', sent_at: new Date().toISOString() });
+                    await refreshData();
+                    
+                    // Simulate send delay
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                    // Mark as sent
+                    await dbService.updateCampaign(db, {
+                        ...campaign,
+                        status: 'Sent',
+                        sent_at: new Date().toISOString(),
+                        recipient_count: recipientIds.length,
+                        recipients: recipientIds,
+                    });
+                    await refreshData();
+                }
+            }
+        } catch (error) {
+            console.error("Error in scheduler:", error);
+        } finally {
+            isSchedulerRunning.current = false;
+        }
+    };
+
+    // Check immediately on load, then every 30 seconds
+    checkAndSendScheduledCampaigns();
+    const interval = setInterval(checkAndSendScheduledCampaigns, 30000);
+
+    return () => clearInterval(interval);
+  }, [db, appData.activeDb, refreshData]);
+
   const handleSetDb = (newDb: dbService.DB) => {
     setDb(newDb);
     refreshData();
@@ -83,6 +158,21 @@ const App: React.FC = () => {
     dbService.setActiveDbId(id);
     setActiveDatabaseId(id);
   }
+  
+  const handleRecreateDatabase = async () => {
+    if (db) {
+      // Close the current DB connection if it exists to release file locks
+      try {
+        db.close();
+      } catch (e) {
+        console.warn("Could not close existing DB, it might already be closed.", e);
+      }
+    }
+    localStorage.removeItem('wvvt_sqlite_db');
+    localStorage.removeItem('wvvt_active_db_id');
+    await initializeApp();
+  };
+
 
   const handleLogin = () => setIsLoggedIn(true);
   const handleLogout = () => setIsLoggedIn(false);
@@ -111,6 +201,19 @@ const App: React.FC = () => {
     setActiveView('COMPOSE');
   };
 
+  const unscheduleCampaign = async (id: number) => {
+    if (!db || !appData.activeDb) return;
+    const campaignToUnschedule = appData.activeDb.campaigns.find(c => c.id === id);
+    if (campaignToUnschedule && campaignToUnschedule.status === 'Scheduled') {
+        await dbService.updateCampaign(db, {
+            ...campaignToUnschedule,
+            status: 'Draft',
+            scheduled_at: null,
+        });
+        await refreshData();
+    }
+  };
+
   const handleCloneCampaign = async (id: number) => {
     if (!appData.activeDb) return;
     const campaignToClone = appData.activeDb.campaigns.find(c => c.id === id);
@@ -121,6 +224,7 @@ const App: React.FC = () => {
         subject: `[CLONE] ${campaignToClone.subject}`,
         status: 'Draft',
         sent_at: null,
+        scheduled_at: null,
         recipient_count: 0,
         recipients: [],
     };
@@ -140,12 +244,11 @@ const App: React.FC = () => {
   };
 
   const renderView = () => {
-    if (isLoading) {
+    if (isLoading || !db) {
         return <div className="text-center p-10">Loading Database...</div>;
     }
     
-    // FIX: Prioritize rendering the Admin view, as it's needed to select/create a database.
-    if (activeView === 'ADMIN' && db) {
+    if (activeView === 'ADMIN') {
        return <Admin 
           db={db}
           setDb={handleSetDb}
@@ -153,10 +256,11 @@ const App: React.FC = () => {
           activeDatabaseId={activeDatabaseId}
           setActiveDatabaseId={handleSetActiveDbId}
           refreshData={refreshData}
+          onRecreateDatabase={handleRecreateDatabase}
         />;
     }
 
-    if (!appData.activeDb || !db || !activeDatabaseId) {
+    if (!appData.activeDb || !activeDatabaseId) {
       return (
         <div className="text-center p-10">
           <h2 className="text-2xl font-bold text-gray-700">No Active Database</h2>
@@ -201,7 +305,14 @@ const App: React.FC = () => {
             key={editingCampaignId || 'new'}
         />;
       case 'CAMPAIGNS':
-        return <Campaigns campaigns={campaigns} subscribers={subscribers} handleEdit={handleEditCampaign} handleDelete={deleteCampaign} handleClone={handleCloneCampaign} />;
+        return <Campaigns 
+            campaigns={campaigns} 
+            subscribers={subscribers} 
+            handleEdit={handleEditCampaign} 
+            handleDelete={deleteCampaign} 
+            handleClone={handleCloneCampaign}
+            handleUnschedule={unscheduleCampaign}
+        />;
       case 'DATA':
         return <DataManager 
           db={db}

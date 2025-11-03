@@ -71,9 +71,6 @@ const Dashboard: React.FC<DashboardProps> = ({ subscribers, campaigns }) => {
   const sentCampaigns = campaigns.filter(c => c.status === 'Sent');
   const draftCampaigns = campaigns.filter(c => c.status === 'Draft');
 
-  const activeSubscribers = subscribers.filter(s => !s.unsubscribed_at);
-  const unsubscribedCount = subscribers.length - activeSubscribers.length;
-
   const totalRecipients = sentCampaigns.reduce((acc, c) => acc + c.recipient_count, 0);
   const avgRecipients = sentCampaigns.length > 0 ? (totalRecipients / sentCampaigns.length).toFixed(1) : '0';
 
@@ -83,10 +80,10 @@ const Dashboard: React.FC<DashboardProps> = ({ subscribers, campaigns }) => {
       <p className="mt-1 text-gray-600">Welcome back! Here's a summary of your newsletter platform.</p>
 
       <div className="grid grid-cols-1 gap-6 mt-8 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard title="Active Subscribers" value={activeSubscribers.length} icon={ICONS.subscribers} />
+        <StatCard title="Total Subscribers" value={subscribers.length} icon={ICONS.subscribers} />
         <StatCard title="Campaigns Sent" value={sentCampaigns.length} icon={ICONS.campaigns} />
-        <StatCard title="Unsubscribed" value={unsubscribedCount} icon={ICONS.unsubscribe} />
-        <StatCard title="Drafts" value={draftCampaigns.length} icon={ICONS.edit} />
+        <StatCard title="Drafts in Progress" value={draftCampaigns.length} icon={ICONS.edit} />
+        <StatCard title="Avg. Recipients" value={avgRecipients} icon={ICONS.compose} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">

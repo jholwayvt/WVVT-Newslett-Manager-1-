@@ -1,4 +1,5 @@
 
+
 import React, { useState } from 'react';
 import { Tag, Campaign } from '../types';
 import { ICONS } from '../constants';
@@ -113,6 +114,7 @@ const Tags: React.FC<TagsProps> = ({ db, activeDatabaseId, refreshData, tags, ca
       {editingTag && (
         <EditTagModal 
             tag={editingTag} 
+            campaigns={campaigns}
             onClose={() => setEditingTag(null)} 
             onSave={handleEditTag}
             isSaving={isSubmitting}
@@ -140,7 +142,7 @@ const TagHistoryModal: React.FC<{
     onClose: () => void;
 }> = ({ tag, campaigns, onClose }) => {
     // This is an approximation. It finds campaigns where this tag was used in targeting.
-    const relevantCampaigns = campaigns.filter(c => c.status === 'Sent' && c.target?.tags.includes(tag.id));
+    const relevantCampaigns = campaigns.filter(c => c.status === 'Sent' && c.target?.groups?.some(g => g.tags.includes(tag.id)));
 
     return (
         <Modal title={`Campaign History for "${tag.name}" Tag`} onClose={onClose}>
@@ -150,7 +152,6 @@ const TagHistoryModal: React.FC<{
                         <li key={c.id} className="p-3 bg-gray-50 rounded-md">
                             <p className="font-semibold text-gray-800">{c.subject}</p>
                             <p className="text-sm text-gray-500">Sent on {c.sent_at ? new Date(c.sent_at).toLocaleString() : 'N/A'}</p>
-                            <p className="text-xs text-gray-400">Target Logic: {c.target?.logic}</p>
                         </li>
                     ))}
                 </ul>
@@ -163,10 +164,11 @@ const TagHistoryModal: React.FC<{
 
 const EditTagModal: React.FC<{
     tag: Tag;
+    campaigns: Campaign[];
     onClose: () => void;
     onSave: (tag: Tag) => void;
     isSaving: boolean;
-}> = ({ tag, onClose, onSave, isSaving }) => {
+}> = ({ tag, campaigns, onClose, onSave, isSaving }) => {
     const [name, setName] = useState(tag.name);
     
     const handleSubmit = (e: React.FormEvent) => {
@@ -176,6 +178,10 @@ const EditTagModal: React.FC<{
         }
     };
 
+    const targetedCampaigns = campaigns.filter(c => 
+        c.target?.groups?.some(g => g.tags.includes(tag.id))
+    );
+
     return (
         <Modal title="Edit Tag" onClose={onClose}>
             <form onSubmit={handleSubmit}>
@@ -184,6 +190,14 @@ const EditTagModal: React.FC<{
                     <label htmlFor="name" className="block text-sm font-medium text-gray-700">Tag Name</label>
                     <input type="text" id="name" value={name} onChange={(e) => setName(e.target.value)} required className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
                   </div>
+                  {targetedCampaigns.length > 0 && (
+                    <div>
+                        <h4 className="text-sm font-medium text-gray-700">Used in {targetedCampaigns.length} Campaign(s)</h4>
+                        <ul className="mt-2 text-sm text-gray-600 list-disc list-inside max-h-32 overflow-y-auto bg-gray-50 p-2 rounded">
+                            {targetedCampaigns.map(c => <li key={c.id} className="truncate" title={c.subject}>{c.subject} ({c.status})</li>)}
+                        </ul>
+                    </div>
+                  )}
                 </div>
                 <div className="mt-6 flex justify-end space-x-3">
                   <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancel</button>

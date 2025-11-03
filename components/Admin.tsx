@@ -1,8 +1,8 @@
-
 import React, { useState, useEffect } from 'react';
-import { Database, Tag, Subscriber, SocialLink } from '../types';
+import { Database, Tag, Subscriber, SocialLink, SchemaComparisonReport } from '../types';
 import { ICONS } from '../constants';
 import Modal from './Modal';
+import ConfirmationModal from './ConfirmationModal';
 import * as dbService from '../services/dbService';
 
 type SimpleDb = Omit<Database, 'subscribers' | 'tags' | 'campaigns'>;
@@ -15,12 +15,16 @@ interface AdminProps {
   activeDatabaseId: number | null;
   setActiveDatabaseId: (id: number | null) => void;
   refreshData: () => Promise<void>;
+  onRecreateDatabase: () => Promise<void>;
 }
 
-const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, setActiveDatabaseId, refreshData }) => {
+const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, setActiveDatabaseId, refreshData, onRecreateDatabase }) => {
   const [isDbModalOpen, setIsDbModalOpen] = useState(false);
   const [editingDatabase, setEditingDatabase] = useState<SimpleDb | null>(null);
   const [isMoverOpen, setIsMoverOpen] = useState(false);
+  const [isRecreatingDb, setIsRecreatingDb] = useState(false);
+  const [schemaReport, setSchemaReport] = useState<SchemaComparisonReport | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const handleCreate = () => {
     setEditingDatabase(null);
@@ -50,11 +54,12 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
     }
     if (window.confirm("Are you sure you want to permanently delete this database and all its data?")) {
       await dbService.deleteDatabase(db, id);
-      const newDbs = databases.filter(db => db.id !== id);
       if (activeDatabaseId === id) {
+        const newDbs = databases.filter(dbItem => dbItem.id !== id);
         setActiveDatabaseId(newDbs[0]?.id || null);
+      } else {
+        await refreshData();
       }
-      await refreshData();
     }
   };
 
@@ -81,7 +86,6 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
         const contents = e.target?.result as ArrayBuffer;
         const newDb = await dbService.loadDbFromExternalFile(new Uint8Array(contents));
         setDb(newDb);
-        // After import, try to activate the first available DB.
         const dbs = await dbService.getDatabases(newDb);
         setActiveDatabaseId(dbs[0]?.id || null);
       } catch (error: any)
@@ -91,6 +95,35 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
     };
     reader.readAsArrayBuffer(file);
     event.target.value = '';
+  };
+
+  const handleTestDbFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsAnalyzing(true);
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+        try {
+            const contents = e.target?.result as ArrayBuffer;
+            const tempDb = await dbService.loadDbFromExternalFile(new Uint8Array(contents));
+            const report = await dbService.analyzeDatabaseSchema(tempDb);
+            setSchemaReport(report);
+            tempDb.close(); // Important: close the temporary DB
+        } catch (error: any) {
+            alert(`Analysis failed: ${error.message}`);
+        } finally {
+            setIsAnalyzing(false);
+        }
+    };
+    reader.readAsArrayBuffer(file);
+    event.target.value = '';
+  };
+
+
+  const handleConfirmRecreate = async () => {
+    await onRecreateDatabase();
+    setIsRecreatingDb(false);
   };
   
   const downloadTemplate = (type: 'databases' | 'subscribers' | 'tags' | 'campaigns' | 'subscriber_tags' | 'sqlite') => {
@@ -111,18 +144,18 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
         databases: 'id,name,description,logo_base64,street,city,state,zip_code,county,website,phone,fax_number,social_links_json,key_contact_name,key_contact_phone,key_contact_email',
         subscribers: 'id,database_id,email,name,subscribed_at,external_id',
         tags: 'id,database_id,name',
-        campaigns: 'id,database_id,subject,body,sent_at,recipient_count,status,target_tags_json,target_logic,recipients_json',
+        campaigns: 'id,database_id,subject,body,sent_at,recipient_count,status,recipients_json,target_groups_json',
         subscriber_tags: 'subscriber_id,tag_id'
     };
     const content = `data:text/csv;charset=utf-8,${headers[type]}\n`;
     const encodedUri = encodeURI(content);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `${type}_template.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    dbService.downloadFile(`${type}_template.csv`, encodedUri, 'text/csv;charset=utf-8,');
   }
+
+  const handleDownloadSeedScript = () => {
+    const script = dbService.generateSeedSqlScript();
+    dbService.downloadFile("sample_database_seed.sql", script, "application/sql");
+  };
 
   const SocialIcons: React.FC<{ links: SocialLink[] }> = ({ links }) => {
     const getIcon = (platform: SocialLink['platform']) => {
@@ -162,22 +195,23 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
             <div className="flex flex-wrap gap-4">
               <button onClick={handleExportSQLite} className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md shadow-sm hover:bg-blue-700">{ICONS.download}<span className="ml-2">Save DB File (.sqlite3)</span></button>
               <label className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-md shadow-sm hover:bg-green-700 cursor-pointer">{ICONS.upload}<span className="ml-2">Load DB File (.sqlite3)</span><input type='file' className="hidden" accept=".sqlite3,.db,.sqlite" onChange={handleImportSQLite} /></label>
+              <label className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-gray-700 bg-gray-200 rounded-md shadow-sm hover:bg-gray-300 cursor-pointer">{ICONS.database}<span className="ml-2">{isAnalyzing ? 'Analyzing...' : 'Test Database File'}</span><input type='file' className="hidden" accept=".sqlite3,.db,.sqlite" onChange={handleTestDbFile} disabled={isAnalyzing} /></label>
+              <button onClick={() => setIsRecreatingDb(true)} className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md shadow-sm hover:bg-red-700">{ICONS.trash}<span className="ml-2">Recreate Database</span></button>
             </div>
         </div>
          <div>
             <h2 className="text-xl font-semibold text-gray-800 mb-4">Templates for Advanced Database Editing</h2>
             <p className="text-sm text-gray-600 mb-3">
-                <strong className="text-red-600">For Advanced Users Only:</strong> These templates match the raw database schema. They are intended for populating a 
-                <code className="text-xs bg-gray-200 p-1 rounded mx-1">blank_template.sqlite3</code> file using an external tool like DB Browser for SQLite. 
-                <strong>These CSV templates are NOT compatible with the simplified importer on the Subscribers page.</strong> For standard subscriber imports, please use the template provided within the Import/Export dialog on the Subscribers page.
+                <strong className="text-red-600">For Advanced Users Only:</strong> Use these templates to populate a 
+                <code className="text-xs bg-gray-200 p-1 rounded mx-1">blank_template.sqlite3</code> file externally.
+                For standard subscriber imports, use the simpler template on the Subscribers page.
             </p>
             <div className="flex flex-wrap gap-4">
+              <button onClick={handleDownloadSeedScript} className="px-3 py-1.5 text-xs font-medium text-white bg-gray-700 rounded-md hover:bg-gray-800">Sample Database Script (.sql)</button>
+              <button onClick={() => downloadTemplate('sqlite')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Blank Database (.sqlite3)</button>
               <button onClick={() => downloadTemplate('databases')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Databases.csv</button>
               <button onClick={() => downloadTemplate('subscribers')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Subscribers.csv</button>
               <button onClick={() => downloadTemplate('tags')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Tags.csv</button>
-              <button onClick={() => downloadTemplate('campaigns')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Campaigns.csv</button>
-              <button onClick={() => downloadTemplate('subscriber_tags')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Subscriber_Tags.csv</button>
-              <button onClick={() => downloadTemplate('sqlite')} className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200">Blank Database.sqlite3</button>
             </div>
         </div>
       </div>
@@ -234,9 +268,69 @@ const Admin: React.FC<AdminProps> = ({ db, setDb, databases, activeDatabaseId, s
 
       {isDbModalOpen && <DatabaseModal dbToEdit={editingDatabase} onClose={() => setIsDbModalOpen(false)} onSave={handleSaveDatabase} />}
       {isMoverOpen && <SubscriberMover db={db} databases={databases} onClose={() => setIsMoverOpen(false)} onComplete={refreshData} />}
+      {isRecreatingDb && (
+        <ConfirmationModal
+            isOpen={isRecreatingDb}
+            title="Recreate Entire Database?"
+            message="WARNING: This is a destructive action. It will delete all companies, subscribers, and campaigns and create a new, blank database with default sample data. This cannot be undone."
+            onConfirm={handleConfirmRecreate}
+            onCancel={() => setIsRecreatingDb(false)}
+            confirmText="Recreate"
+        />
+      )}
+      {schemaReport && <SchemaReportModal report={schemaReport} onClose={() => setSchemaReport(null)} />}
     </div>
   );
 };
+
+const SchemaReportModal: React.FC<{ report: SchemaComparisonReport, onClose: () => void }> = ({ report, onClose }) => {
+    const hasIssues = report.tables.some(t => t.isMissing || t.missingColumns.length > 0 || t.extraColumns.length > 0) || report.extraTables.length > 0;
+
+    return (
+        <Modal title="Database Schema Analysis Report" onClose={onClose} maxWidth="max-w-3xl">
+            <div className="max-h-[70vh] overflow-y-auto space-y-4">
+                {!hasIssues ? (
+                    <div className="p-4 bg-green-50 text-green-800 rounded-md">
+                        <h3 className="font-semibold">Schema looks good!</h3>
+                        <p>The uploaded database schema matches the application's required schema. Any import issues are likely related to the data itself, not the structure.</p>
+                    </div>
+                ) : (
+                    <div className="p-4 bg-yellow-50 text-yellow-800 rounded-md">
+                        <h3 className="font-semibold">Schema differences found.</h3>
+                        <p>The uploaded database has structural differences. This may cause errors on import. See details below.</p>
+                    </div>
+                )}
+                {report.tables.map(table => (
+                    <div key={table.name} className="p-3 border rounded-md">
+                        <h4 className={`font-bold ${table.isMissing ? 'text-red-600' : 'text-gray-800'}`}>
+                            Table: <code className="bg-gray-200 px-1 rounded">{table.name}</code>
+                            {table.isMissing && <span className="ml-2">(MISSING)</span>}
+                        </h4>
+                        {!table.isMissing && (
+                            <ul className="text-sm list-disc list-inside pl-4 mt-2">
+                                {table.missingColumns.map(col => <li key={col.name} className="text-red-600">Missing column: <code className="bg-red-100">{col.name}</code> (Expected: {col.expected})</li>)}
+                                {table.extraColumns.map(colName => <li key={colName} className="text-orange-600">Extra column: <code className="bg-orange-100">{colName}</code></li>)}
+                                {table.missingColumns.length === 0 && table.extraColumns.length === 0 && <li className="text-green-600">Columns match.</li>}
+                            </ul>
+                        )}
+                    </div>
+                ))}
+                {report.extraTables.length > 0 && (
+                     <div className="p-3 border rounded-md">
+                        <h4 className="font-bold text-orange-600">Extra Tables Found</h4>
+                        <ul className="text-sm list-disc list-inside pl-4 mt-2">
+                            {report.extraTables.map(tableName => <li key={tableName}>Found extra table: <code className="bg-orange-100">{tableName}</code></li>)}
+                        </ul>
+                    </div>
+                )}
+            </div>
+             <div className="mt-6 flex justify-end">
+                <button onClick={onClose} className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700">Close</button>
+            </div>
+        </Modal>
+    );
+};
+
 
 const DatabaseModal: React.FC<{
   dbToEdit: SimpleDb | null;
